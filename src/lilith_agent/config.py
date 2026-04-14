@@ -2,6 +2,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 
+def _get_int_env(key: str, default: str) -> int:
+    val = os.getenv(key, default)
+    if not val or not val.strip():
+        return int(default)
+    try:
+        return int(val)
+    except ValueError:
+        return int(default)
+
 @dataclass
 class Config:
     cheap_provider: str
@@ -26,6 +35,7 @@ class Config:
     caveman: bool = False
     caveman_mode: str = "full"
     recursion_limit: int = 100
+    max_context_messages: int = 30
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -47,9 +57,10 @@ class Config:
             huggingface_api_key=os.getenv("GAIA_HUGGINGFACE_API_KEY", ""),
             tavily_api_key=os.getenv("GAIA_TAVILY_API_KEY", ""),
             lmstudio_base_url=os.getenv("GAIA_LMSTUDIO_BASE_URL", ""),
-            max_tokens=int(os.getenv("GAIA_MAX_TOKENS", "65536")),
-            max_json_repairs=int(os.getenv("GAIA_MAX_JSON_REPAIRS", "5")),
+            max_tokens=_get_int_env("GAIA_MAX_TOKENS", "65536"),
+            max_json_repairs=_get_int_env("GAIA_MAX_JSON_REPAIRS", "5"),
             caveman=os.getenv("GAIA_CAVEMAN", "true").lower() == "true",
             caveman_mode=os.getenv("GAIA_CAVEMAN_MODE", "full"),
-            recursion_limit=int(os.getenv("GAIA_RECURSION_LIMIT", "50")),
+            recursion_limit=_get_int_env("GAIA_RECURSION_LIMIT", "50"),
+            max_context_messages=_get_int_env("GAIA_MAX_CONTEXT_MESSAGES", "20"),
         )

@@ -125,6 +125,18 @@ def _compact_old_tool_messages(messages: list, keep_recent: int = _COMPACT_KEEP_
     return out
 
 
+def _trim_messages(messages: list, max_messages: int) -> list:
+    """Keep only the last `max_messages`, but always try to preserve the initial System/Human message."""
+    if not messages or len(messages) <= max_messages:
+        return messages
+
+    # Always keep the first message if it's a SystemMessage or the first HumanMessage
+    # This preserves the core task instructions.
+    head = messages[0:1]
+    tail = messages[-(max_messages-1):]
+
+    log.info("[trimmer] keeping first message + last %d messages (dropped %d)", len(tail), len(messages) - len(tail) - 1)
+    return head + tail
 
 
 def _build_tool_node(tools: list[BaseTool]) -> Callable:
@@ -197,10 +209,11 @@ def _build_tool_node(tools: list[BaseTool]) -> Callable:
                             tool_call_id=tc_id,
                             name=name,
                             content=(
-                                f"SEMANTIC DUPLICATE (similarity={best_score:.2f}). "
+                                f"PATH EXHAUSTED (similarity={best_score:.2f}). "
                                 f"Your query {q!r} is too similar to a prior search {best_prior!r}. "
-                                "Re-read the earlier results instead of searching again. "
-                                "If you must search, use substantially different keywords, or commit to an answer with what you have."
+                                "This search path is likely dead. DO NOT keep tweaking the query. "
+                                "Summarize the best possible guess from existing snippets and move to a final answer immediately. "
+                                "If you must continue searching, use a COMPLETELY different keyword or strategy."
                             ),
                             status="error",
                         ))
@@ -293,11 +306,17 @@ def build_react_agent(cfg: Config):
             "3. NO REDUNDANT CHECKS: Do NOT run redundant tools just to double-check. "
             "If you found a name, number, or fact that fits the constraints, output it as the answer immediately.\n"
             "4. CONTEXT RESOLUTION: Treat the conversation history purely as read-only background context. "
-            "Your active formatting rules are dictated ENTIRELY by the user's most recent message."
+            "Your active formatting rules are dictated ENTIRELY by the user's most recent message.\n"
+            "5. NO-RETRY GUIDELINES: If you encounter a paywall, CAPTCHA, or 'Semantic Duplicate' error, consider that path dead. "
+            "Summarize the best possible guess from snippets and move to Final Answer immediately. NEVER output an empty response."
         )
         sys_prompt = apply_caveman(base_prompt, cfg.caveman, cfg.caveman_mode)
         sys_msg = SystemMessage(sys_prompt)
-        compacted = _compact_old_tool_messages(state["messages"])
+        
+        # Message Trimming & Compaction
+        raw_msgs = state["messages"]
+        trimmed = _trim_messages(raw_msgs, cfg.max_context_messages)
+        compacted = _compact_old_tool_messages(trimmed)
 
         prompt_msgs = [sys_msg]
         tool_calls_this_turn = _count_tool_calls_since_last_human(state["messages"])
@@ -311,6 +330,16 @@ def build_react_agent(cfg: Config):
         prompt_msgs += compacted
 
         response = model.invoke(prompt_msgs)
+        
+        # Fallback for empty responses
+        if not response.content and not getattr(response, "tool_calls", None):
+            log.warning("[model_node] blank response detected; injecting system nudge")
+            response = AIMessage(content=(
+                "SYSTEM: Your previous response was empty. If you have enough information, "
+                "provide a 'Final Answer:'. If you are stuck, return a best guess based on "
+                "available snippets or explain why you cannot complete the task."
+            ))
+
         return {"messages": [response], "iterations": state.get("iterations", 0) + 1}
 
     def fail_safe_node(state):

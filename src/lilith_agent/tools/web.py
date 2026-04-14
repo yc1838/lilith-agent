@@ -56,6 +56,18 @@ def fetch_url(url: str, max_chars: int = 8000, timeout: float = 60.0) -> str:
             extracted = trafilatura.extract(resp.text, include_comments=False, include_tables=True)
             text = extracted or resp.text
 
+        # 4. CAPTCHA / Anti-Bot Detection
+        captcha_markers = [
+            "verification required", "captcha", "anti-robot", "check connecting",
+            "bot detection", "robot check", "friendly captcha"
+        ]
+        text_lower = text.lower()
+        if any(marker in text_lower for marker in captcha_markers):
+            return (
+                "WEB_FETCH_ERROR: CAPTCHA/Bot detection encountered. This URL is currently inaccessible via automated tools. "
+                "DO NOT retry this exact URL. Try a different source or use search snippets to answer."
+            )
+
         if len(text) > max_chars:
             text = text[:max_chars] + "\n...[truncated]"
         return text
