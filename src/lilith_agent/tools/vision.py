@@ -78,7 +78,11 @@ def inspect_visual_content(file_path_or_url: str, prompt: str, cfg: Config) -> s
             resp = httpx.get(file_path_or_url, headers=headers, follow_redirects=True, timeout=30.0)
             resp.raise_for_status()
             data = resp.content
-            mime_type = resp.headers.get("Content-Type", "image/png")
+            mime_type = resp.headers.get("Content-Type", "image/png").split(";")[0].strip()
+            if not (mime_type.startswith("image/") or mime_type.startswith("video/")):
+                return (f"URL did not return an image/video (got {mime_type}). "
+                        f"The URL likely points to an HTML page, not a direct media file. "
+                        f"Find a direct image URL (ending in .jpg/.png/.webp) instead.")
         else:
             path = Path(file_path_or_url)
             data = path.read_bytes()

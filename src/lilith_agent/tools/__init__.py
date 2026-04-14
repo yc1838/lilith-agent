@@ -23,7 +23,10 @@ from lilith_agent.tools.python_exec import run_python as _run_python
 from lilith_agent.tools.search import tavily_search as _tavily_search
 from lilith_agent.tools.vision import inspect_visual_content as _inspect_visual_content
 from lilith_agent.tools.web import fetch_url as _fetch_url
-from lilith_agent.tools.youtube import youtube_transcript as _youtube_transcript
+from lilith_agent.tools.youtube import (
+    youtube_transcript as _youtube_transcript,
+    youtube_frame_at as _youtube_frame_at,
+)
 from lilith_agent.tools.academic import (
     arxiv_search as _arxiv_search, 
     crossref_search as _crossref_search,
@@ -107,8 +110,18 @@ def build_tools(cfg: Config) -> list[BaseTool]:
 
     @tool
     def youtube_transcript(url: str) -> str:
-        """Fetch the transcript for a YouTube video URL."""
+        """Fetch the spoken-word transcript (captions) for a YouTube video URL.
+        Does NOT capture on-screen text overlays — use `youtube_frame_at` + `inspect_visual_content` for those."""
         return _youtube_transcript(url)
+
+    @tool
+    def youtube_frame_at(url: str, timestamp_seconds: float) -> str:
+        """Download a YouTube video and extract ONE frame at the given timestamp as a local PNG.
+        Returns the local PNG path — pass it to `inspect_visual_content` to read on-screen text or visual details.
+        REQUIRED for questions about what is visible on screen at a specific time in a YouTube video
+        (e.g. a phrase shown as a title card, or an object visible at 0:30).
+        """
+        return _youtube_frame_at(url, timestamp_seconds=timestamp_seconds)
 
     @tool
     def arxiv_search(query: str, max_results: int = 5) -> str:
@@ -145,6 +158,7 @@ def build_tools(cfg: Config) -> list[BaseTool]:
         read_file,
         transcribe_audio,
         youtube_transcript,
+        youtube_frame_at,
         inspect_pdf,
         inspect_visual_content,
         arxiv_search,

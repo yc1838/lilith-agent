@@ -64,8 +64,24 @@ def _extract_text(content) -> str:
     return str(content) if content is not None else ""
 
 
+_CAVEMAN_HINTS = {
+    "brief": "make model talk very brief",
+    "full": "make model talk like caveman (terse, substance only)",
+    "ultra": "make model talk ultra-compressed",
+}
+
+
+def _print_caveman_status(cfg):
+    if cfg.caveman:
+        hint = _CAVEMAN_HINTS.get(cfg.caveman_mode, "terse mode")
+        console.print(f"[italic magenta]caveman: on[/italic magenta] [dim](mode: {cfg.caveman_mode} — {hint})[/dim]")
+    else:
+        console.print("[dim]caveman: off[/dim]")
+
+
 def main_loop(cfg):
     print_logo()
+    _print_caveman_status(cfg)
     log_path = setup_logging(".lilith")
     console.print(f"[dim cyan]Logging to {log_path}[/dim cyan]")
     if setup_arize(project_name="lilith"):
@@ -122,11 +138,17 @@ def main_loop(cfg):
         if text.lower().startswith("/caveman") or text.lower().startswith("/cavemen"):
             parts = text.split()
             if len(parts) > 1:
-                cfg.caveman = True
-                cfg.caveman_mode = parts[1]
+                arg = parts[1].lower()
+                if arg in ("off", "false", "no", "disable"):
+                    cfg.caveman = False
+                elif arg in ("on", "true", "yes", "enable"):
+                    cfg.caveman = True
+                else:
+                    cfg.caveman = True
+                    cfg.caveman_mode = arg
             else:
                 cfg.caveman = not cfg.caveman
-            
+
             state_str = "ENABLED" if cfg.caveman else "DISABLED"
             console.print(f"[dim cyan]CAVEMAN MODE {state_str} (mode: {cfg.caveman_mode})[/dim cyan]\n")
             continue

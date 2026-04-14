@@ -40,12 +40,14 @@ def setup_arize(project_name: str = "lilith") -> bool:
     os.environ.setdefault("OTEL_EXPORTER_OTLP_TIMEOUT", "2")
     os.environ.setdefault("OTEL_BSP_EXPORT_TIMEOUT", "2000")
 
-    tracer_provider = register(
-        space_id=space_id,
-        api_key=api_key,
-        project_name=project_name,
-    )
-    LangChainInstrumentor().instrument(tracer_provider=tracer_provider)
+    import contextlib, io
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        tracer_provider = register(
+            space_id=space_id,
+            api_key=api_key,
+            project_name=project_name,
+        )
+        LangChainInstrumentor().instrument(tracer_provider=tracer_provider)
 
     import atexit
     def _shutdown():

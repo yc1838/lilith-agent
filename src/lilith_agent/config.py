@@ -49,7 +49,7 @@ class Config:
             lmstudio_base_url=os.getenv("GAIA_LMSTUDIO_BASE_URL", ""),
             max_tokens=int(os.getenv("GAIA_MAX_TOKENS", "65536")),
             max_json_repairs=int(os.getenv("GAIA_MAX_JSON_REPAIRS", "5")),
-            caveman=os.getenv("GAIA_CAVEMAN", "false").lower() == "true",
+            caveman=os.getenv("GAIA_CAVEMAN", "true").lower() == "true",
             caveman_mode=os.getenv("GAIA_CAVEMAN_MODE", "full"),
             recursion_limit=int(os.getenv("GAIA_RECURSION_LIMIT", "50")),
         )
