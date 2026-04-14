@@ -84,10 +84,16 @@ def youtube_frame_at(url: str, timestamp_seconds: float) -> str:
             video_out = matches[0]
 
         frame_out = tmp_dir / f"{vid}_t{int(timestamp_seconds)}.png"
+        # Hybrid seek: fast-seek to 2s before target (keyframe-accurate),
+        # then slow-seek the remaining 2s on the decoded stream for frame-accurate landing.
+        fast_ss = max(0.0, timestamp_seconds - 2.0)
+        slow_ss = timestamp_seconds - fast_ss
         cmd = [
-            ffmpeg, "-y", "-ss", str(timestamp_seconds),
-            "-i", str(video_out), "-frames:v", "1",
-            "-q:v", "2", str(frame_out),
+            ffmpeg, "-y",
+            "-ss", str(fast_ss), "-i", str(video_out),
+            "-ss", str(slow_ss),
+            "-frames:v", "1", "-q:v", "2",
+            str(frame_out),
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if proc.returncode != 0 or not frame_out.exists():

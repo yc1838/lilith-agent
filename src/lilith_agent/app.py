@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import string
 from typing import Callable
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
@@ -41,6 +43,88 @@ def _collect_seen_calls(messages) -> set[tuple[str, str]]:
     return seen
 
 
+_COMPACT_KEEP_RECENT = 4
+_COMPACT_MAX_CHARS = 300
+
+_BUDGET_WARN_AT = 15
+_BUDGET_HARD_CAP = 25
+
+_SEMANTIC_DEDUP_THRESHOLD = 0.5
+_STOPWORDS = {
+    "a", "an", "the", "of", "in", "on", "at", "for", "to", "and", "or", "but",
+    "is", "are", "was", "were", "be", "been", "being", "by", "with", "from",
+    "as", "that", "this", "it", "its", "which", "who", "whom", "what", "when",
+    "where", "why", "how", "do", "does", "did", "can", "could", "should",
+    "would", "will", "about", "into", "over", "under", "than", "then", "so",
+    "if", "not", "no", "yes", "any", "all", "some", "each", "every",
+}
+
+
+def _normalize_query_tokens(q: str) -> frozenset[str]:
+    q = q.lower()
+    q = q.translate(str.maketrans("", "", string.punctuation))
+    tokens = [t for t in re.split(r"\s+", q) if t and t not in _STOPWORDS]
+    return frozenset(tokens)
+
+
+def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _count_tool_calls_since_last_human(messages: list) -> int:
+    """Count AIMessage tool_calls made after the most recent HumanMessage."""
+    count = 0
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            break
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+            count += len(m.tool_calls)
+    return count
+
+
+def _prior_tavily_queries(messages: list) -> list[tuple[str, frozenset[str]]]:
+    """All tavily_search queries from prior AIMessages in this turn (since last HumanMessage)."""
+    out: list[tuple[str, frozenset[str]]] = []
+    collecting = True
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            out = []
+            collecting = True
+            continue
+        if collecting and isinstance(m, AIMessage):
+            for tc in getattr(m, "tool_calls", None) or []:
+                if tc.get("name") == "tavily_search":
+                    q = (tc.get("args") or {}).get("query", "")
+                    if q:
+                        out.append((q, _normalize_query_tokens(q)))
+    return out
+
+
+def _compact_old_tool_messages(messages: list, keep_recent: int = _COMPACT_KEEP_RECENT, max_chars: int = _COMPACT_MAX_CHARS) -> list:
+    """Return a shallow-copied message list where older ToolMessage contents are truncated.
+
+    Tool results often dominate context (search dumps, page fetches). Keep the `keep_recent`
+    most recent ToolMessages verbatim; older ones get shrunk to `max_chars` with a clear
+    "[COMPACTED: N chars dropped]" suffix so the model knows data was pruned but still
+    sees the lead-in to recall what the call was about.
+    """
+    tool_indices = [i for i, m in enumerate(messages) if isinstance(m, ToolMessage)]
+    keep_indices = set(tool_indices[-keep_recent:])
+
+    out = []
+    for i, m in enumerate(messages):
+        if isinstance(m, ToolMessage) and i not in keep_indices:
+            content = str(m.content)
+            if len(content) > max_chars:
+                dropped = len(content) - max_chars
+                new_content = content[:max_chars] + f"\n...[COMPACTED: {dropped} chars dropped from older tool result]..."
+                m = m.model_copy(update={"content": new_content})
+        out.append(m)
+    return out
+
+
 
 
 def _build_tool_node(tools: list[BaseTool]) -> Callable:
@@ -59,6 +143,7 @@ def _build_tool_node(tools: list[BaseTool]) -> Callable:
 
         # "seen" = calls that appeared in AIMessages strictly BEFORE the current one.
         seen = _collect_seen_calls(messages[:-1])
+        prior_tavily = _prior_tavily_queries(messages[:-1])
 
         def count_recent_errors(tool_name: str) -> int:
             count = 0
@@ -96,6 +181,30 @@ def _build_tool_node(tools: list[BaseTool]) -> Callable:
                     status="error",
                 ))
                 continue
+
+            if name == "tavily_search":
+                q = (args or {}).get("query", "")
+                if q:
+                    q_tokens = _normalize_query_tokens(q)
+                    best_prior, best_score = None, 0.0
+                    for prior_q, prior_tokens in prior_tavily:
+                        score = _jaccard(q_tokens, prior_tokens)
+                        if score > best_score:
+                            best_prior, best_score = prior_q, score
+                    if best_score >= _SEMANTIC_DEDUP_THRESHOLD:
+                        log.warning("[semantic_dedup] %.2f match vs prior: %r ~ %r", best_score, q, best_prior)
+                        results.append(ToolMessage(
+                            tool_call_id=tc_id,
+                            name=name,
+                            content=(
+                                f"SEMANTIC DUPLICATE (similarity={best_score:.2f}). "
+                                f"Your query {q!r} is too similar to a prior search {best_prior!r}. "
+                                "Re-read the earlier results instead of searching again. "
+                                "If you must search, use substantially different keywords, or commit to an answer with what you have."
+                            ),
+                            status="error",
+                        ))
+                        continue
 
             if count_recent_errors(name) >= 3:
                 log.warning("[loop_breaker] force-cooldown %s", name)
@@ -188,7 +297,20 @@ def build_react_agent(cfg: Config):
         )
         sys_prompt = apply_caveman(base_prompt, cfg.caveman, cfg.caveman_mode)
         sys_msg = SystemMessage(sys_prompt)
-        response = model.invoke([sys_msg] + state["messages"])
+        compacted = _compact_old_tool_messages(state["messages"])
+
+        prompt_msgs = [sys_msg]
+        tool_calls_this_turn = _count_tool_calls_since_last_human(state["messages"])
+        if tool_calls_this_turn >= _BUDGET_WARN_AT:
+            prompt_msgs.append(SystemMessage(
+                f"[BUDGET WARNING: {tool_calls_this_turn} tool calls used on this question "
+                f"(hard cap at {_BUDGET_HARD_CAP}). STOP exploring. Commit to your best answer "
+                "NOW using evidence already gathered. Further searches are almost certainly wasted — "
+                "you already have enough to answer or you need to pivot strategy entirely.]"
+            ))
+        prompt_msgs += compacted
+
+        response = model.invoke(prompt_msgs)
         return {"messages": [response], "iterations": state.get("iterations", 0) + 1}
 
     def fail_safe_node(state):
@@ -198,7 +320,8 @@ def build_react_agent(cfg: Config):
             "You are FORCED to stop. Provide a brief 'Final Answer:' summarizing what you have tried, "
             "why it failed, and what the best conclusion is so far."
         )
-        response = model.invoke([SystemMessage(sys_prompt)] + state["messages"])
+        compacted = _compact_old_tool_messages(state["messages"])
+        response = model.invoke([SystemMessage(sys_prompt)] + compacted)
         return {"messages": [response]}
 
     tool_node = _build_tool_node(tools)
@@ -209,6 +332,9 @@ def build_react_agent(cfg: Config):
     graph.add_node("fail_safe", fail_safe_node)
     def _route_after_model(state) -> str:
         if state.get("iterations", 0) >= cfg.recursion_limit - 2:
+            return "fail_safe"
+        if _count_tool_calls_since_last_human(state["messages"]) >= _BUDGET_HARD_CAP:
+            log.warning("[hard_cap] per-question tool-call cap hit; forcing fail_safe")
             return "fail_safe"
         last = state["messages"][-1]
         if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):

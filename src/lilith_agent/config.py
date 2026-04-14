@@ -25,7 +25,7 @@ class Config:
     max_json_repairs: int = 5
     caveman: bool = False
     caveman_mode: str = "full"
-    recursion_limit: int = 50
+    recursion_limit: int = 100
 
     @classmethod
     def from_env(cls) -> "Config":
