@@ -125,20 +125,6 @@ def _compact_old_tool_messages(messages: list, keep_recent: int = _COMPACT_KEEP_
     return out
 
 
-def _trim_messages(messages: list, max_messages: int) -> list:
-    """Keep only the last `max_messages`, but always try to preserve the initial System/Human message."""
-    if not messages or len(messages) <= max_messages:
-        return messages
-
-    # Always keep the first message if it's a SystemMessage or the first HumanMessage
-    # This preserves the core task instructions.
-    head = messages[0:1]
-    tail = messages[-(max_messages-1):]
-
-    log.info("[trimmer] keeping first message + last %d messages (dropped %d)", len(tail), len(messages) - len(tail) - 1)
-    return head + tail
-
-
 def _build_tool_node(tools: list[BaseTool]) -> Callable:
     """Tool executor with dedup + exception-to-ToolMessage feedback.
 
@@ -313,10 +299,8 @@ def build_react_agent(cfg: Config):
         sys_prompt = apply_caveman(base_prompt, cfg.caveman, cfg.caveman_mode)
         sys_msg = SystemMessage(sys_prompt)
         
-        # Message Trimming & Compaction
-        raw_msgs = state["messages"]
-        trimmed = _trim_messages(raw_msgs, cfg.max_context_messages)
-        compacted = _compact_old_tool_messages(trimmed)
+        # Message Compaction
+        compacted = _compact_old_tool_messages(state["messages"])
 
         prompt_msgs = [sys_msg]
         tool_calls_this_turn = _count_tool_calls_since_last_human(state["messages"])

@@ -35,7 +35,6 @@ class Config:
     caveman: bool = False
     caveman_mode: str = "full"
     recursion_limit: int = 100
-    max_context_messages: int = 30
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -62,5 +61,4 @@ class Config:
             caveman=os.getenv("GAIA_CAVEMAN", "true").lower() == "true",
             caveman_mode=os.getenv("GAIA_CAVEMAN_MODE", "full"),
             recursion_limit=_get_int_env("GAIA_RECURSION_LIMIT", "50"),
-            max_context_messages=_get_int_env("GAIA_MAX_CONTEXT_MESSAGES", "20"),
         )
