@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lilith-agent"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = [
+  "langgraph>=0.2.0",
+  "langchain-core>=0.3.0",
+  "langchain-anthropic>=0.2.0",
+  "langchain-google-genai>=2.0.0",
+  "langchain-ollama>=0.2.0",
+  "langchain-huggingface>=0.1.0",
+  "langchain-openai>=1.0.0",
+  "tavily-python>=0.5.0",
+  "trafilatura>=1.12.0",
+  "pypdf>=5.0.0",
+  "openpyxl>=3.1.0",
+  "python-docx>=1.1.0",
+  "faster-whisper>=1.0.0",
+  "youtube-transcript-api>=0.6.0",
+  "pydantic>=2.0.0",
+  "python-dotenv>=1.0.0",
+  "ddgs>=6.0.0",
+  "beautifulsoup4>=4.12.0",
+  "fal-client",
+  "tenacity",
+  "rich>=13.0.0",
+  "prompt-toolkit>=3.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.24.0",
+  "responses>=0.25.0",
+]
+
+[project.scripts]
+lilith = "lilith_agent.tui:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

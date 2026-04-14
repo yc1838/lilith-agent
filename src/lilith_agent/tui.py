@@ -1,0 +1,162 @@
+import sys
+import uuid
+from pathlib import Path
+from dotenv import load_dotenv
+
+env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+load_dotenv(dotenv_path=env_path, override=True)
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.markdown import Markdown
+from rich.align import Align
+from rich.live import Live
+from rich.spinner import Spinner
+from rich.theme import Theme
+from prompt_toolkit import PromptSession
+from prompt_toolkit.styles import Style
+
+from lilith_agent.config import Config
+from lilith_agent.app import build_react_agent
+from lilith_agent.observability import setup_logging, setup_arize, JsonlTraceCallback
+
+custom_theme = Theme({
+    "info": "dim cyan",
+    "warning": "magenta",
+    "danger": "bold red",
+    "lilith_primary": "italic magenta"
+})
+
+console = Console(theme=custom_theme)
+
+prompt_style = Style.from_dict({
+    'prompt': 'ansimagenta bold',
+})
+
+LILITH_LOGO = r"""
+ [magenta]🦋   L I L I T H   🦋[/magenta]
+ [cyan]ReAct Research Assistant[/cyan]
+"""
+
+def print_logo():
+    logo_text = Align.center(LILITH_LOGO)
+    console.print(Panel(logo_text, border_style="magenta", expand=False))
+
+def _extract_text(content) -> str:
+    """Flatten AIMessage.content to a string. Anthropic returns a list of
+    content blocks (e.g. [{"type": "text", "text": "..."}, {"type": "tool_use", ...}]);
+    other providers return a plain string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text" and "text" in block:
+                    parts.append(block["text"])
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return str(content) if content is not None else ""
+
+
+def main_loop(cfg):
+    print_logo()
+    log_path = setup_logging(".lilith")
+    console.print(f"[dim cyan]Logging to {log_path}[/dim cyan]")
+    if setup_arize(project_name="lilith"):
+        console.print("[dim cyan]Arize tracing: enabled[/dim cyan]")
+    console.print("\n[dim cyan]Initializing agent...[/dim cyan]")
+
+    try:
+        graph = build_react_agent(cfg)
+    except Exception as e:
+        console.print(f"[bold red]Failed to build graph: {e}[/bold red]")
+        sys.exit(1)
+
+    console.print("[dim cyan]Agent ready. Type 'exit' or 'quit' to close.[/dim cyan]\n")
+
+    session = PromptSession(style=prompt_style)
+
+    # Persistent thread ID plus JSONL trace of every tool/LLM event for this session.
+    thread_id = str(uuid.uuid4())
+    trace_path = log_path.with_name(log_path.stem + ".jsonl")
+    trace_cb = JsonlTraceCallback(trace_path)
+    thread_config = {
+        "configurable": {"thread_id": thread_id},
+        "callbacks": [trace_cb],
+    }
+    console.print(f"[dim cyan]Trace: {trace_path}[/dim cyan]\n")
+    
+    while True:
+        try:
+            user_input = session.prompt("lilith 🦋 > ")
+        except KeyboardInterrupt:
+            continue
+        except EOFError:
+            break
+            
+        text = user_input.strip()
+        if not text:
+            continue
+            
+        if text.lower() in ("exit", "quit"):
+            console.print("[magenta]Goodbye! 🦋[/magenta]")
+            break
+            
+        # ReAct agent uses "messages" state natively
+        input_state = {"messages": [("user", text)]}
+        
+        console.print("\n")
+        
+        with Live(Spinner("dots", text="[magenta]Thinking...[/magenta]"), refresh_per_second=10) as live:
+            last_message = None
+            try:
+                for chunk in graph.stream(input_state, thread_config, stream_mode="values"):
+                    if "messages" in chunk:
+                        # stream_mode="values" returns the full state after each node.
+                        # the last message added is the newest state.
+                        latest = chunk["messages"][-1]
+                        
+                        if latest.type == "ai" and latest.tool_calls:
+                            tool_strs = []
+                            for tc in latest.tool_calls:
+                                name = tc.get("name", "unknown")
+                                dict_args = tc.get("args", {})
+                                if isinstance(dict_args, dict):
+                                    arg_str = ", ".join(f"{k}={repr(v)[:50] + '...' if len(repr(v)) > 50 else repr(v)}" for k, v in dict_args.items())
+                                else:
+                                    arg_str = repr(dict_args)[:50] + '...' if len(repr(dict_args)) > 50 else repr(dict_args)
+                                tool_strs.append(f"{name}({arg_str})")
+                            tools = " | ".join(tool_strs)
+                            live.console.print(f"[dim cyan] [TOOL][/dim cyan] {tools}")
+                            
+                        elif latest.type == "tool":
+                            content_str = str(latest.content).replace('\n', ' ')
+                            content_preview = content_str[:150] + ("..." if len(content_str) > 150 else "")
+                            live.console.print(f"[dim cyan] [OBSERVATION][/dim cyan] {latest.name}: {content_preview}")
+                            
+                        last_message = latest
+                        
+            except Exception as e:
+                live.console.print(f"[bold red]Agent Error: {e}[/bold red]")
+                import traceback
+                traceback.print_exc()
+                continue
+                
+        # Final output
+        if last_message and last_message.type == "ai":
+            answer = _extract_text(last_message.content)
+            if answer:
+                console.print(Panel(Markdown(answer), title="🦋 [magenta]Lilith's Answer[/magenta]", border_style="magenta"))
+            else:
+                console.print("[yellow]Agent finished but returned no text content.[/yellow]\n")
+        else:
+             console.print("[yellow]Agent execution ended.[/yellow]\n")
+
+def main():
+    cfg = Config.from_env()
+    main_loop(cfg)
+
+if __name__ == "__main__":
+    main()

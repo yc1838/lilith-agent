@@ -1,0 +1,4 @@
+.lilith
+src/lilith_agent/tools/__pycache__/
+tests/__pycache__/
+.env
