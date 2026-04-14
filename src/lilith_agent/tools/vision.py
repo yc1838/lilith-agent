@@ -30,7 +30,7 @@ def inspect_visual_content(file_path_or_url: str, prompt: str, cfg: Config) -> s
         "llava": "fal-ai/moondream-next", # Accurate & Fast default
         "llava-1.5": "fal-ai/llava-next",
         "fal-ai/llava/v1.5/7b": "fal-ai/llava-next", # Autocorrect user string
-        "gemini-flash": "gemini-2.0-flash",
+        "gemini-flash": "gemini-3.0-flash",
     }
     
     requested_model = cfg.vision_model
@@ -74,7 +74,8 @@ def inspect_visual_content(file_path_or_url: str, prompt: str, cfg: Config) -> s
     content = [{"type": "text", "text": prompt}]
     try:
         if file_path_or_url.startswith(("http://", "https://")):
-            resp = httpx.get(file_path_or_url, follow_redirects=True, timeout=30.0)
+            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            resp = httpx.get(file_path_or_url, headers=headers, follow_redirects=True, timeout=30.0)
             resp.raise_for_status()
             data = resp.content
             mime_type = resp.headers.get("Content-Type", "image/png")
@@ -100,15 +101,15 @@ def inspect_visual_content(file_path_or_url: str, prompt: str, cfg: Config) -> s
         res2 = _call_vision(fallback_model, "fal", b64_data, mime_type, content)
     else:
         # If the primary Google model failed, try the stable Flash model
-        res2 = _call_vision("gemini-2.0-flash", "google", b64_data, mime_type, content)
+        res2 = _call_vision("gemini-3-flash-preview", "google", b64_data, mime_type, content)
     
     if not res2.startswith("ERROR:"):
         return res2
 
     # 4. Attempt 3: Cross-Provider Ultimate Last Resort (Gemini Flash)
     if requested_provider == "fal":
-        log.warning("[vision] All FAL attempts failed. Triggering ultimate last resort: gemini-2.0-flash on Google")
-        ultimate_res = _call_vision("gemini-2.0-flash", "google", b64_data, mime_type, content)
+        log.warning("[vision] All FAL attempts failed. Triggering ultimate last resort: gemini-3-flash-preview on Google")
+        ultimate_res = _call_vision("gemini-3-flash-preview", "google", b64_data, mime_type, content)
         if not ultimate_res.startswith("ERROR:"):
             return ultimate_res
         _vision_session_failed = True

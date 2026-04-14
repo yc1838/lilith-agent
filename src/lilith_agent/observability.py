@@ -92,13 +92,31 @@ def setup_logging(log_dir: str | Path = ".lilith") -> Path:
     return log_path
 
 
+def _sanitize(obj: Any, depth: int = 0) -> Any:
+    if depth > 10:
+        return obj
+    if hasattr(obj, "content") and hasattr(obj, "additional_kwargs") and hasattr(obj, "type"):
+        return _msg_to_dict(obj)
+    if isinstance(obj, dict):
+        return {k: _sanitize(v, depth + 1) for k, v in obj.items() if k != "__gemini_function_call_thought_signatures__"}
+    if isinstance(obj, list):
+        return [_sanitize(v, depth + 1) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize(v, depth + 1) for v in obj)
+    return obj
+
 def _coerce(obj: Any) -> Any:
     try:
-        json.dumps(obj)
-        return obj
+        out = _sanitize(obj)
+        # Attempt to see if it is JSON-serializable after sanitization
+        json.dumps(out)
+        return out
     except Exception:
-        return repr(obj)
-
+        # Fallback to repr if there's still un-serializable objects
+        try:
+            return repr(out)
+        except UnboundLocalError:
+            return repr(obj)
 
 def _msg_to_dict(msg: Any) -> dict:
     """Convert any BaseMessage-like object to a JSON-safe dict with all payload fields."""
@@ -106,20 +124,15 @@ def _msg_to_dict(msg: Any) -> dict:
         mtype = getattr(msg, "type", None) or msg.__class__.__name__
         out = {
             "type": mtype,
-            "content": _coerce(getattr(msg, "content", None)),
+            "content": _sanitize(getattr(msg, "content", None), 1),
         }
         for attr in ("name", "tool_call_id", "tool_calls", "additional_kwargs", "response_metadata", "usage_metadata"):
             val = getattr(msg, attr, None)
             if val:
-                if isinstance(val, dict) and "__gemini_function_call_thought_signatures__" in val:
-                    val = dict(val)
-                    val.pop("__gemini_function_call_thought_signatures__", None)
-                if val:
-                    out[attr] = _coerce(val)
+                out[attr] = _sanitize(val, 1)
         return out
     except Exception:
         return {"type": "unknown", "repr": repr(msg)}
-
 
 def _generations_to_list(response: Any) -> Any:
     gens = getattr(response, "generations", None)
@@ -134,9 +147,6 @@ def _generations_to_list(response: Any) -> Any:
                 batch_out.append(_msg_to_dict(msg))
             else:
                 info = getattr(gen, "generation_info", None)
-                if isinstance(info, dict) and "__gemini_function_call_thought_signatures__" in info:
-                    info = dict(info)
-                    info.pop("__gemini_function_call_thought_signatures__", None)
                 batch_out.append({"text": getattr(gen, "text", ""), "info": _coerce(info)})
         out.append(batch_out)
     usage = getattr(response, "llm_output", None)
@@ -160,12 +170,13 @@ class JsonlTraceCallback(BaseCallbackHandler):
 
     def _emit(self, record: dict) -> None:
         record.setdefault("ts", datetime.now(timezone.utc).isoformat())
+        record.pop("run_id", None)
         line = json.dumps(record, default=repr)
         self._fh.write(line + "\n")
         self._fh.flush()
         # Real-time mirror: short summary line to the logger (which lands in the .log file).
         summary = f"{record['event']}"
-        for k in ("name", "model", "elapsed_s", "run_id"):
+        for k in ("name", "model", "elapsed_s"):
             if k in record:
                 summary += f" {k}={record[k]}"
         if "error" in record:
