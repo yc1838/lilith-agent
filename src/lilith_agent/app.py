@@ -8,14 +8,19 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
-from langgraph.graph.message import MessagesState
+from langgraph.graph.message import MessagesState, add_messages
+from typing import Annotated, TypedDict
+
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]
+    iterations: int
+
 
 from lilith_agent.config import Config
 from lilith_agent.models import get_extra_strong_model
 
 log = logging.getLogger(__name__)
 
-RECURSION_LIMIT = 50
 
 
 def _call_key(name: str, args) -> tuple[str, str]:
@@ -36,11 +41,6 @@ def _collect_seen_calls(messages) -> set[tuple[str, str]]:
     return seen
 
 
-def _route_after_model(state) -> str:
-    last = state["messages"][-1]
-    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-        return "tools"
-    return END
 
 
 def _build_tool_node(tools: list[BaseTool]) -> Callable:
@@ -59,6 +59,21 @@ def _build_tool_node(tools: list[BaseTool]) -> Callable:
 
         # "seen" = calls that appeared in AIMessages strictly BEFORE the current one.
         seen = _collect_seen_calls(messages[:-1])
+
+        def count_recent_errors(tool_name: str) -> int:
+            count = 0
+            for m in reversed(messages):
+                if isinstance(m, ToolMessage) and m.name == tool_name:
+                    if getattr(m, "status", "") == "error":
+                        count += 1
+                    else:
+                        break
+                # Only check contiguous blocks of prior tools/AI messages
+                elif isinstance(m, AIMessage):
+                    continue
+                else: 
+                    break
+            return count
 
         results: list[ToolMessage] = []
         for tc in tool_calls:
@@ -82,6 +97,20 @@ def _build_tool_node(tools: list[BaseTool]) -> Callable:
                 ))
                 continue
 
+            if count_recent_errors(name) >= 3:
+                log.warning("[loop_breaker] force-cooldown %s", name)
+                results.append(ToolMessage(
+                    tool_call_id=tc_id,
+                    name=name,
+                    content=(
+                        f"SYSTEM CRITICAL: You have consecutively failed to use `{name}` 3 times. "
+                        "This tool is now placed on temporary COOLDOWN. "
+                        "You MUST shift your strategy and use a different tool or provide a final answer based on what you know."
+                    ),
+                    status="error"
+                ))
+                continue
+
             tool = tools_by_name.get(name)
             if tool is None:
                 results.append(ToolMessage(
@@ -97,6 +126,8 @@ def _build_tool_node(tools: list[BaseTool]) -> Callable:
             except Exception as e:
                 log.warning("[tool_node] %s raised: %s", name, e)
                 out = f"ERROR: {type(e).__name__}: {e}"
+                if len(out) > 1000:
+                    out = out[:1000] + "\n...[TRUNCATED BY SYSTEM TO PREVENT CONTEXT COLLAPSE]..."
                 results.append(ToolMessage(tool_call_id=tc_id, name=name, content=str(out), status="error"))
                 continue
 
@@ -105,6 +136,29 @@ def _build_tool_node(tools: list[BaseTool]) -> Callable:
         return {"messages": results}
 
     return tool_node
+
+
+CAVEMAN_SYSTEM = (
+    "Respond terse like smart caveman. All technical substance stay. Only fluff die.\n\n"
+    "Intensity: {mode}\n\n"
+    "RULES:\n"
+    "Drop: articles (a/an/the), filler (just/really/basically/actually/simply), pleasantries (sure/certainly/of course/happy to), hedging.\n"
+    "Fragments OK. Short synonyms (big not extensive, fix not 'implement a solution for').\n"
+    "Technical terms exact. Code blocks unchanged. Errors quoted exact.\n\n"
+    "Pattern: [thing] [action] [reason]. [next step].\n\n"
+    "INTENSITY LEVELS:\n"
+    "- lite: No filler/hedging. Keep articles + full sentences. Professional but tight.\n"
+    "- full: Drop articles, fragments OK, short synonyms. Classic caveman.\n"
+    "- ultra: Abbreviate (DB/auth/config/req/res/fn/impl), strip conjunctions, arrows for causality (X -> Y), one word when one word enough.\n"
+)
+
+
+def apply_caveman(base_prompt: str, caveman_enabled: bool, mode: str = "full") -> str:
+    if not caveman_enabled:
+        return base_prompt
+    
+    caveman_instructions = CAVEMAN_SYSTEM.format(mode=mode)
+    return f"{caveman_instructions}\n\nREMAINING SYSTEM INSTRUCTIONS (FOLLOW THESE EXACTLY BUT IN CAVEMAN STYLE):\n{base_prompt}"
 
 
 def build_react_agent(cfg: Config):
@@ -119,17 +173,49 @@ def build_react_agent(cfg: Config):
     model = get_extra_strong_model(cfg).bind_tools(tools)
 
     def model_node(state):
-        response = model.invoke(state["messages"])
+        from langchain_core.messages import SystemMessage
+        base_prompt = (
+            "You are Lilith, an autonomous ReAct research assistant operating in a continuous session. "
+            "Treat the conversation history purely as read-only background context to help you resolve references and understand the user's intent. "
+            "Your active instructions, operational constraints, and formatting rules are dictated ENTIRELY by the user's most recent message. "
+            "If past rules conflict with the newest request, the newest request supersedes them.\n\n"
+            "CRITICAL: Once you have obtained the computation result or gathered enough facts to formulate a complete answer, "
+            "IMMEDIATELY stop calling tools and synthesize your final conclusion answering the user's question directly. "
+            "Do NOT run redundant variations of the same tool or script just to double-check."
+        )
+        sys_prompt = apply_caveman(base_prompt, cfg.caveman, cfg.caveman_mode)
+        sys_msg = SystemMessage(sys_prompt)
+        response = model.invoke([sys_msg] + state["messages"])
+        return {"messages": [response], "iterations": state.get("iterations", 0) + 1}
+
+    def fail_safe_node(state):
+        from langchain_core.messages import SystemMessage
+        sys_prompt = (
+            "SYSTEM EMERGENCY OVERRIDE: You have hit the absolute maximum iteration limit for this task. "
+            "You are FORCED to stop. Provide a brief 'Final Answer:' summarizing what you have tried, "
+            "why it failed, and what the best conclusion is so far."
+        )
+        response = model.invoke([SystemMessage(sys_prompt)] + state["messages"])
         return {"messages": [response]}
 
     tool_node = _build_tool_node(tools)
 
-    graph = StateGraph(MessagesState)
+    graph = StateGraph(AgentState)
     graph.add_node("model", model_node)
     graph.add_node("tools", tool_node)
+    graph.add_node("fail_safe", fail_safe_node)
+    def _route_after_model(state) -> str:
+        if state.get("iterations", 0) >= cfg.recursion_limit - 2:
+            return "fail_safe"
+        last = state["messages"][-1]
+        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+            return "tools"
+        return END
+
     graph.set_entry_point("model")
-    graph.add_conditional_edges("model", _route_after_model, {"tools": "tools", END: END})
+    graph.add_conditional_edges("model", _route_after_model, {"tools": "tools", "fail_safe": "fail_safe", END: END})
     graph.add_edge("tools", "model")
+    graph.add_edge("fail_safe", END)
 
     compiled = graph.compile(checkpointer=MemorySaver())
-    return compiled.with_config({"recursion_limit": RECURSION_LIMIT})
+    return compiled.with_config({"recursion_limit": cfg.recursion_limit})

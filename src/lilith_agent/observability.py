@@ -111,7 +111,11 @@ def _msg_to_dict(msg: Any) -> dict:
         for attr in ("name", "tool_call_id", "tool_calls", "additional_kwargs", "response_metadata", "usage_metadata"):
             val = getattr(msg, attr, None)
             if val:
-                out[attr] = _coerce(val)
+                if isinstance(val, dict) and "__gemini_function_call_thought_signatures__" in val:
+                    val = dict(val)
+                    val.pop("__gemini_function_call_thought_signatures__", None)
+                if val:
+                    out[attr] = _coerce(val)
         return out
     except Exception:
         return {"type": "unknown", "repr": repr(msg)}
@@ -129,7 +133,11 @@ def _generations_to_list(response: Any) -> Any:
             if msg is not None:
                 batch_out.append(_msg_to_dict(msg))
             else:
-                batch_out.append({"text": getattr(gen, "text", "") , "info": _coerce(getattr(gen, "generation_info", None))})
+                info = getattr(gen, "generation_info", None)
+                if isinstance(info, dict) and "__gemini_function_call_thought_signatures__" in info:
+                    info = dict(info)
+                    info.pop("__gemini_function_call_thought_signatures__", None)
+                batch_out.append({"text": getattr(gen, "text", ""), "info": _coerce(info)})
         out.append(batch_out)
     usage = getattr(response, "llm_output", None)
     return {"generations": out, "llm_output": _coerce(usage)}

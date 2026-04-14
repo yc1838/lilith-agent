@@ -2,3 +2,4 @@
 src/lilith_agent/tools/__pycache__/
 tests/__pycache__/
 .env
+src/lilith_agent/__pycache__/*

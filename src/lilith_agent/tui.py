@@ -104,8 +104,31 @@ def main_loop(cfg):
             console.print("[magenta]Goodbye! 🦋[/magenta]")
             break
             
+        if text.lower() == "/clear":
+            thread_id = str(uuid.uuid4())
+            trace_path = log_path.with_name(f"{log_path.stem}-{thread_id[:8]}.jsonl")
+            trace_cb = JsonlTraceCallback(trace_path)
+            thread_config = {
+                "configurable": {"thread_id": thread_id},
+                "callbacks": [trace_cb],
+            }
+            console.print("[dim cyan]Conversation memory cleared. Starting a new thread.[/dim cyan]\n")
+            continue
+            
+        if text.lower().startswith("/caveman") or text.lower().startswith("/cavemen"):
+            parts = text.split()
+            if len(parts) > 1:
+                cfg.caveman = True
+                cfg.caveman_mode = parts[1]
+            else:
+                cfg.caveman = not cfg.caveman
+            
+            state_str = "ENABLED" if cfg.caveman else "DISABLED"
+            console.print(f"[dim cyan]CAVEMAN MODE {state_str} (mode: {cfg.caveman_mode})[/dim cyan]\n")
+            continue
+            
         # ReAct agent uses "messages" state natively
-        input_state = {"messages": [("user", text)]}
+        input_state = {"messages": [("user", text)], "iterations": 0}
         
         console.print("\n")
         
@@ -133,7 +156,10 @@ def main_loop(cfg):
                             
                         elif latest.type == "tool":
                             content_str = str(latest.content).replace('\n', ' ')
-                            content_preview = content_str[:150] + ("..." if len(content_str) > 150 else "")
+                            if len(content_str) > 300:
+                                content_preview = content_str[:150] + " ... " + content_str[-150:]
+                            else:
+                                content_preview = content_str
                             live.console.print(f"[dim cyan] [OBSERVATION][/dim cyan] {latest.name}: {content_preview}")
                             
                         last_message = latest

@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 
-@dataclass(frozen=True)
+@dataclass
 class Config:
     cheap_provider: str
     cheap_model: str
@@ -25,6 +25,7 @@ class Config:
     max_json_repairs: int = 5
     caveman: bool = False
     caveman_mode: str = "full"
+    recursion_limit: int = 50
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -46,8 +47,9 @@ class Config:
             huggingface_api_key=os.getenv("GAIA_HUGGINGFACE_API_KEY", ""),
             tavily_api_key=os.getenv("GAIA_TAVILY_API_KEY", ""),
             lmstudio_base_url=os.getenv("GAIA_LMSTUDIO_BASE_URL", ""),
-            max_tokens=int(os.getenv("GAIA_MAX_TOKENS", "1024")),
+            max_tokens=int(os.getenv("GAIA_MAX_TOKENS", "65536")),
             max_json_repairs=int(os.getenv("GAIA_MAX_JSON_REPAIRS", "5")),
             caveman=os.getenv("GAIA_CAVEMAN", "false").lower() == "true",
             caveman_mode=os.getenv("GAIA_CAVEMAN_MODE", "full"),
+            recursion_limit=int(os.getenv("GAIA_RECURSION_LIMIT", "50")),
         )
