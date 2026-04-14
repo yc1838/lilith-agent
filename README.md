@@ -1,3 +1,16 @@
+---
+title: Lilith Agent
+emoji: 🦋
+colorFrom: pink
+colorTo: purple
+sdk: gradio
+sdk_version: 5.25.2
+app_file: app.py
+pinned: false
+hf_oauth: true
+hf_oauth_expiration_minutes: 480
+---
+
 # Lilith Agent
 
 🦋 A ReAct research assistant built on LangGraph. Lilith plans, calls tools, and answers open-ended research questions from a TUI or a batch runner over the GAIA benchmark.
