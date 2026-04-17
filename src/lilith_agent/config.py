@@ -11,6 +11,16 @@ def _get_int_env(key: str, default: str) -> int:
     except ValueError:
         return int(default)
 
+
+def _get_float_env(key: str, default: str) -> float:
+    val = os.getenv(key, default)
+    if not val or not val.strip():
+        return float(default)
+    try:
+        return float(val)
+    except ValueError:
+        return float(default)
+
 @dataclass
 class Config:
     cheap_provider: str
@@ -31,10 +41,12 @@ class Config:
     tavily_api_key: str
     lmstudio_base_url: str
     max_tokens: int
-    max_json_repairs: int = 5
     caveman: bool = False
     caveman_mode: str = "full"
     recursion_limit: int = 100
+    budget_hard_cap: int = 25
+    budget_warn_at: int = 15
+    semantic_dedup_threshold: float = 0.5
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -57,8 +69,10 @@ class Config:
             tavily_api_key=os.getenv("GAIA_TAVILY_API_KEY", ""),
             lmstudio_base_url=os.getenv("GAIA_LMSTUDIO_BASE_URL", ""),
             max_tokens=_get_int_env("GAIA_MAX_TOKENS", "65536"),
-            max_json_repairs=_get_int_env("GAIA_MAX_JSON_REPAIRS", "5"),
             caveman=os.getenv("GAIA_CAVEMAN", "true").lower() == "true",
             caveman_mode=os.getenv("GAIA_CAVEMAN_MODE", "full"),
             recursion_limit=_get_int_env("GAIA_RECURSION_LIMIT", "50"),
+            budget_hard_cap=_get_int_env("GAIA_BUDGET_HARD_CAP", "25"),
+            budget_warn_at=_get_int_env("GAIA_BUDGET_WARN_AT", "15"),
+            semantic_dedup_threshold=_get_float_env("GAIA_SEMANTIC_DEDUP_THRESHOLD", "0.5"),
         )

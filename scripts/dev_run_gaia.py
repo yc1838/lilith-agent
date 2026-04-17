@@ -34,12 +34,13 @@ except ImportError:
 
 from lilith_agent.config import Config  # noqa: E402
 from lilith_agent.gaia_dataset import GaiaDatasetClient  # noqa: E402
+from lilith_agent.observability import JsonlTraceCallback, setup_arize, setup_logging  # noqa: E402
 from lilith_agent.runner import run_agent_on_questions  # noqa: E402
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=10, help="Number of questions to run. Set to -1 for all.")
+    parser.add_argument("--limit", type=int, default=None, help="Number of questions to run. Defaults to all.")
     parser.add_argument("--level", type=str, default="1")
     parser.add_argument("--verbose", action="store_true", help="Enable LangChain debug logging")
     parser.add_argument("--config", type=str, default="2023_all")
@@ -72,6 +73,15 @@ def main() -> None:
     if not args.verbose:
         for noisy in ("httpx", "httpcore", "langchain_core", "openai", "urllib3", "google_genai"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    # Mirror TUI observability: write a session .log + full untruncated .jsonl trace
+    # under .lilith/, plus enable Arize if env vars are set.
+    log_path = setup_logging()
+    trace_path = log_path.with_suffix(".jsonl")
+    trace_cb = JsonlTraceCallback(trace_path)
+    setup_arize()
+    print(f"Session log:   {log_path}")
+    print(f"Session trace: {trace_path}")
 
     token = os.getenv("HF_TOKEN") or os.getenv("GAIA_HUGGINGFACE_API_KEY")
 
@@ -140,7 +150,9 @@ def main() -> None:
         caveman=args.cavemen if args.cavemen else cfg.caveman,
         caveman_mode=args.caveman_mode if args.caveman_mode != "full" else cfg.caveman_mode
     )
-    limit = args.limit if args.limit > 0 else None
+    limit = args.limit
+    if limit is not None and limit <= 0:
+        limit = None
     
     target_ids = []
     if args.rerun_failed:
@@ -168,6 +180,8 @@ def main() -> None:
         questions = client.get_questions()
         if target_ids:
             questions = [q for q in questions if q["task_id"] in target_ids]
+        if limit:
+            questions = questions[:limit]
 
     if not questions:
         print("No matching questions.")
@@ -181,7 +195,7 @@ def main() -> None:
                 print(f"Forcing rerun: deleting checkpoint {checkpoint_path}")
                 checkpoint_path.unlink()
 
-    graph = build_react_agent(cfg)
+    graph = build_react_agent(cfg).with_config({"callbacks": [trace_cb]})
 
     print(f"Running agent on {len(questions)} question(s)...")
     answers = run_agent_on_questions(graph, questions, cfg.checkpoint_dir, client=client)

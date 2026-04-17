@@ -4,3 +4,8 @@ tests/__pycache__/
 .env
 src/lilith_agent/__pycache__/
 .checkpoints/
+.pytest_cache/
+.last_failures.txt
+submission.jsonl
+anatomy.pdf
+anatomy_full.pdf

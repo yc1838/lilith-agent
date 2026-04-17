@@ -65,7 +65,10 @@ GAIA_VISION_PROVIDER=fal
 GAIA_VISION_MODEL=gemini-3-flash-preview
 GAIA_CAVEMAN=true
 GAIA_CAVEMAN_MODE=full
-GAIA_RECURSION_LIMIT=100
+GAIA_RECURSION_LIMIT=50
+GAIA_BUDGET_HARD_CAP=25
+GAIA_BUDGET_WARN_AT=15
+GAIA_SEMANTIC_DEDUP_THRESHOLD=0.5
 ```
 
 ## Run
@@ -99,6 +102,23 @@ python scripts/dev_run_gaia.py --limit 3 --level 1
 python scripts/dev_run_gaia.py --task-id c61d22de-5f6c-4958-a7f6-5e9707bd3466
 ```
 
+```bash
+# Runs all level-one test questions with caveman mode. Rerun without --force to resume.
+python scripts/dev_run_gaia.py --split test --level 1 --limit -1 --cavemen --caveman-mode ultra
+```
+
+```bash
+# Without caveman mode — set GAIA_CAVEMAN=false in .env beforehand.
+python scripts/dev_run_gaia.py --split test --level 1 --limit 5
+```
+
+### Build a leaderboard submission
+
+```bash
+python scripts/build_leaderboard_submission.py --split test --out submission.jsonl
+# Upload submission.jsonl to https://huggingface.co/spaces/gaia-benchmark/leaderboard/submit
+```
+
 Per-question checkpoints land in `.checkpoints/<task_id>.json` — delete one to force a rerun.
 
 ## Tools
@@ -107,7 +127,7 @@ All tools live under [src/lilith_agent/tools/](src/lilith_agent/tools/) and are 
 
 | Tool | Purpose |
 | --- | --- |
-| `tavily_search`, `fetch_url` | Primary web search + page fetch |
+| `web_search`, `fetch_url` | Primary web search + page fetch |
 | `run_python` | Sandboxed Python subprocess (bs4, pandas, trafilatura, pypdf, …) |
 | `read_file`, `ls`, `grep`, `glob_files`, `write_file` | Local filesystem |
 | `transcribe_audio` | faster-whisper |

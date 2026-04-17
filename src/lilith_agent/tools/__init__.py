@@ -20,7 +20,7 @@ from lilith_agent.tools.todos import (
 )
 from lilith_agent.tools.pdf import inspect_pdf as _inspect_pdf
 from lilith_agent.tools.python_exec import run_python as _run_python
-from lilith_agent.tools.search import tavily_search as _tavily_search
+from lilith_agent.tools.search import web_search as _web_search
 from lilith_agent.tools.vision import inspect_visual_content as _inspect_visual_content
 from lilith_agent.tools.web import fetch_url as _fetch_url
 from lilith_agent.tools.youtube import (
@@ -39,10 +39,10 @@ def build_tools(cfg: Config) -> list[BaseTool]:
     """Build the list of LangChain tools, injecting config via closures."""
 
     @tool
-    def tavily_search(query: str, max_results: int = 5) -> str:
-        """Search the web via Tavily. Returns a list of title/url/snippet results.
-        This is the primary web search tool — use it for any general web lookup."""
-        return _tavily_search(query, api_key=cfg.tavily_api_key, max_results=max_results)
+    def web_search(query: str, max_results: int = 5) -> str:
+        """Search the web for general information using DuckDuckGo (primary) and Tavily (fallback).
+        Returns a list of title/url/snippet results. This is your primary web search tool."""
+        return _web_search(query, api_key=cfg.tavily_api_key, max_results=max_results)
 
     @tool
     def fetch_url(url: str, max_chars: int = 8000) -> str:
@@ -152,7 +152,7 @@ def build_tools(cfg: Config) -> list[BaseTool]:
         return _filter_entities(entities, keep_conditions=keep_conditions, remove_conditions=remove_conditions)
 
     return [
-        tavily_search,
+        web_search,
         fetch_url,
         run_python,
         read_file,

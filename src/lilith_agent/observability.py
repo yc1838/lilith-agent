@@ -94,13 +94,26 @@ def setup_logging(log_dir: str | Path = ".lilith") -> Path:
     return log_path
 
 
+# Keys stripped from every trace record — high-volume, low-signal noise
+# from provider responses (Gemini reasoning traces, safety metadata, etc).
+_NOISE_KEYS = frozenset({
+    "__gemini_function_call_thought_signatures__",
+    "reasoning",
+    "signature",
+    "safety_ratings",
+    "safety_settings",
+    "thought_signature",
+    "thought_signatures",
+})
+
+
 def _sanitize(obj: Any, depth: int = 0) -> Any:
     if depth > 10:
         return obj
     if hasattr(obj, "content") and hasattr(obj, "additional_kwargs") and hasattr(obj, "type"):
         return _msg_to_dict(obj)
     if isinstance(obj, dict):
-        return {k: _sanitize(v, depth + 1) for k, v in obj.items() if k != "__gemini_function_call_thought_signatures__"}
+        return {k: _sanitize(v, depth + 1) for k, v in obj.items() if k not in _NOISE_KEYS}
     if isinstance(obj, list):
         return [_sanitize(v, depth + 1) for v in obj]
     if isinstance(obj, tuple):

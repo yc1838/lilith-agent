@@ -48,6 +48,39 @@ _COMPACT_MAX_CHARS = 300
 
 _BUDGET_WARN_AT = 15
 _BUDGET_HARD_CAP = 25
+_DEFAULT_RECURSION_LIMIT = 50
+_DEFAULT_COOLDOWN_LIMIT = 3
+
+
+_RESPONSE_METADATA_NOISE_KEYS = frozenset({
+    "safety_ratings",
+    "safety_settings",
+    "logprobs",
+    "prompt_logprobs",
+    "thought_signature",
+    "thought_signatures",
+    "__gemini_function_call_thought_signatures__",
+})
+
+
+def _strip_response_metadata_noise(meta: dict | None) -> dict:
+    """Drop bulky provider-specific noise while preserving token usage and model id.
+
+    Replaces the previous blanket clear that wiped `input_tokens`/`output_tokens`
+    and broke cost observability in Arize/LangSmith.
+    """
+    if not meta:
+        return {}
+    return {k: v for k, v in meta.items() if k not in _RESPONSE_METADATA_NOISE_KEYS}
+
+
+def _cooldown_limit_for(tool_name: str | None) -> int:
+    """Max consecutive errors from one tool before the loop-breaker fires.
+
+    Single constant today — hook point in case a future tool needs asymmetric
+    tolerance. Replaces the `3 if name == "web_search" else 3` no-op ternary.
+    """
+    return _DEFAULT_COOLDOWN_LIMIT
 
 _SEMANTIC_DEDUP_THRESHOLD = 0.5
 _STOPWORDS = {
@@ -84,8 +117,8 @@ def _count_tool_calls_since_last_human(messages: list) -> int:
     return count
 
 
-def _prior_tavily_queries(messages: list) -> list[tuple[str, frozenset[str]]]:
-    """All tavily_search queries from prior AIMessages in this turn (since last HumanMessage)."""
+def _prior_search_queries(messages: list) -> list[tuple[str, frozenset[str]]]:
+    """All web_search queries from prior AIMessages in this turn (since last HumanMessage)."""
     out: list[tuple[str, frozenset[str]]] = []
     collecting = True
     for m in messages:
@@ -95,7 +128,7 @@ def _prior_tavily_queries(messages: list) -> list[tuple[str, frozenset[str]]]:
             continue
         if collecting and isinstance(m, AIMessage):
             for tc in getattr(m, "tool_calls", None) or []:
-                if tc.get("name") == "tavily_search":
+                if tc.get("name") == "web_search":
                     q = (tc.get("args") or {}).get("query", "")
                     if q:
                         out.append((q, _normalize_query_tokens(q)))
@@ -125,7 +158,32 @@ def _compact_old_tool_messages(messages: list, keep_recent: int = _COMPACT_KEEP_
     return out
 
 
-def _build_tool_node(tools: list[BaseTool]) -> Callable:
+def _route_after_model(
+    state,
+    recursion_limit: int = _DEFAULT_RECURSION_LIMIT,
+    budget_hard_cap: int = _BUDGET_HARD_CAP,
+) -> str:
+    """Routing function for the ReAct graph. Module-scoped so it is unit-testable.
+
+    Returns "fail_safe" when the per-question tool-call budget is exhausted or when
+    iterations are within two of the LangGraph recursion limit; "tools" when the last
+    AIMessage has tool_calls; otherwise END.
+    """
+    if state.get("iterations", 0) >= recursion_limit - 2:
+        return "fail_safe"
+    if _count_tool_calls_since_last_human(state["messages"]) >= budget_hard_cap:
+        log.info("[hard_cap] per-question tool-call cap hit; forcing fail_safe")
+        return "fail_safe"
+    last = state["messages"][-1]
+    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+        return "tools"
+    return END
+
+
+def _build_tool_node(
+    tools: list[BaseTool],
+    semantic_dedup_threshold: float = _SEMANTIC_DEDUP_THRESHOLD,
+) -> Callable:
     """Tool executor with dedup + exception-to-ToolMessage feedback.
 
     Dedup rule: if the same (tool_name, args) pair appeared in any prior
@@ -141,7 +199,7 @@ def _build_tool_node(tools: list[BaseTool]) -> Callable:
 
         # "seen" = calls that appeared in AIMessages strictly BEFORE the current one.
         seen = _collect_seen_calls(messages[:-1])
-        prior_tavily = _prior_tavily_queries(messages[:-1])
+        prior_search = _prior_search_queries(messages[:-1])
 
         def count_recent_errors(tool_name: str) -> int:
             count = 0
@@ -166,7 +224,7 @@ def _build_tool_node(tools: list[BaseTool]) -> Callable:
 
             key = _call_key(name, args)
             if key in seen:
-                log.warning("[dedup] short-circuited repeat tool call: %s %s", name, args)
+                log.info("[dedup] short-circuited repeat tool call: %s %s", name, args)
                 results.append(ToolMessage(
                     tool_call_id=tc_id,
                     name=name or "unknown",
@@ -180,40 +238,42 @@ def _build_tool_node(tools: list[BaseTool]) -> Callable:
                 ))
                 continue
 
-            if name == "tavily_search":
+            if name == "web_search":
                 q = (args or {}).get("query", "")
                 if q:
                     q_tokens = _normalize_query_tokens(q)
                     best_prior, best_score = None, 0.0
-                    for prior_q, prior_tokens in prior_tavily:
+                    for prior_q, prior_tokens in prior_search:
                         score = _jaccard(q_tokens, prior_tokens)
                         if score > best_score:
                             best_prior, best_score = prior_q, score
-                    if best_score >= _SEMANTIC_DEDUP_THRESHOLD:
-                        log.warning("[semantic_dedup] %.2f match vs prior: %r ~ %r", best_score, q, best_prior)
+                    if best_score >= semantic_dedup_threshold:
+                        log.info("[semantic_dedup] %.2f match vs prior: %r ~ %r", best_score, q, best_prior)
                         results.append(ToolMessage(
                             tool_call_id=tc_id,
                             name=name,
                             content=(
-                                f"PATH EXHAUSTED (similarity={best_score:.2f}). "
-                                f"Your query {q!r} is too similar to a prior search {best_prior!r}. "
-                                "This search path is likely dead. DO NOT keep tweaking the query. "
-                                "Summarize the best possible guess from existing snippets and move to a final answer immediately. "
-                                "If you must continue searching, use a COMPLETELY different keyword or strategy."
+                                f"REDUNDANT SEARCH PATH (similarity={best_score:.2f}). "
+                                f"Your query {q!r} is too similar to your prior search {best_prior!r}. "
+                                "Instead of tweaking the same keywords, you MUST PIVOT to a completely "
+                                "different search strategy."
+                                "IMPORTANT: Review your prior tool results. If you already found the answer, STOP and provide it now."
                             ),
                             status="error",
                         ))
                         continue
 
-            if count_recent_errors(name) >= 3:
-                log.warning("[loop_breaker] force-cooldown %s", name)
+            cooldown_limit = _cooldown_limit_for(name)
+            if count_recent_errors(name) >= cooldown_limit:
+                log.info("[loop_breaker] force-cooldown %s (limit=%d)", name, cooldown_limit)
                 results.append(ToolMessage(
                     tool_call_id=tc_id,
                     name=name,
                     content=(
-                        f"SYSTEM CRITICAL: You have consecutively failed to use `{name}` 3 times. "
-                        "This tool is now placed on temporary COOLDOWN. "
-                        "You MUST shift your strategy and use a different tool or provide a final answer based on what you know."
+                        f"SEARCHING HAS STALLED: You have hit the redundancy limit for `{name}`. "
+                        "Doing the same search and expecting different results is counter-productive. "
+                        "You MUST shift to a different way (e.g., Python execution, completely different perspective's strategy) "
+                        "or summarize what you have found so far."
                     ),
                     status="error"
                 ))
@@ -247,17 +307,17 @@ def _build_tool_node(tools: list[BaseTool]) -> Callable:
 
 
 CAVEMAN_SYSTEM = (
-    "Respond terse like smart caveman. All technical substance stay. Only fluff die.\n\n"
+    "Talk smart caveman. Facts stay, fluff die.\n\n"
     "Intensity: {mode}\n\n"
     "RULES:\n"
-    "Drop: articles (a/an/the), filler (just/really/basically/actually/simply), pleasantries (sure/certainly/of course/happy to), hedging.\n"
-    "Fragments OK. Short synonyms (big not extensive, fix not 'implement a solution for').\n"
-    "Technical terms exact. Code blocks unchanged. Errors quoted exact.\n\n"
-    "Pattern: [thing] [action] [reason]. [next step].\n\n"
-    "INTENSITY LEVELS:\n"
-    "- lite: No filler/hedging. Keep articles + full sentences. Professional but tight.\n"
-    "- full: Drop articles, fragments OK, short synonyms. Classic caveman.\n"
-    "- ultra: Abbreviate (DB/auth/config/req/res/fn/impl), strip conjunctions, arrows for causality (X -> Y), one word when one word enough.\n"
+    "- Drop: articles (a/an/the), filler (just/really), pleasantries (sure/happy), hedging.\n"
+    "- Fragments OK. Short words win (big > extensive, fix > implement).\n"
+    "- Tech/Code/Errors: Keep EXACT.\n"
+    "- Logic: [thing] [action] [reason]. [next].\n\n"
+    "MODES:\n"
+    "- lite: No fluff. Full sentences. Pro-tight.\n"
+    "- full: No articles. Fragments OK. Pure caveman.\n"
+    "- ultra: Abbrev (DB/fn/config). X -> Y. One word enough.\n"
 )
 
 
@@ -303,11 +363,27 @@ def build_react_agent(cfg: Config):
         compacted = _compact_old_tool_messages(state["messages"])
 
         prompt_msgs = [sys_msg]
+        
+        # Goal Re-Injection for Focus
+        # Find the first HumanMessage to extract the initial goal
+        initial_question = ""
+        for m in state["messages"]:
+            if isinstance(m, HumanMessage):
+                initial_question = str(m.content).split("--- BENCHMARK SCORING RULES ---")[0].strip()
+                break
+        
         tool_calls_this_turn = _count_tool_calls_since_last_human(state["messages"])
-        if tool_calls_this_turn >= _BUDGET_WARN_AT:
+        if initial_question and tool_calls_this_turn >= 5:
+            prompt_msgs.append(SystemMessage(
+                f"[CURRENT GOAL]: {initial_question}\n\n"
+                "Review your prior messages. If you already have enough information to form a "
+                "strong hypothesis, STOP calling tools and provide a 'Final Answer:' now."
+            ))
+
+        if tool_calls_this_turn >= cfg.budget_warn_at:
             prompt_msgs.append(SystemMessage(
                 f"[BUDGET WARNING: {tool_calls_this_turn} tool calls used on this question "
-                f"(hard cap at {_BUDGET_HARD_CAP}). STOP exploring. Commit to your best answer "
+                f"(hard cap at {cfg.budget_hard_cap}). STOP exploring. Commit to your best answer "
                 "NOW using evidence already gathered. Further searches are almost certainly wasted — "
                 "you already have enough to answer or you need to pivot strategy entirely.]"
             ))
@@ -315,6 +391,15 @@ def build_react_agent(cfg: Config):
 
         response = model.invoke(prompt_msgs)
         
+        # Clean up Gemini signatures and unhelpful metadata to reduce log noise and context bloat
+        if hasattr(response, "additional_kwargs"):
+            response.additional_kwargs.pop("__gemini_function_call_thought_signatures__", None)
+            # Remove function_call duplicate if it exists in additional_kwargs (redundant with tool_calls)
+            response.additional_kwargs.pop("function_call", None)
+            
+        if hasattr(response, "response_metadata"):
+            response.response_metadata = _strip_response_metadata_noise(response.response_metadata)
+            
         # Fallback for empty responses
         if not response.content and not getattr(response, "tool_calls", None):
             log.warning("[model_node] blank response detected; injecting system nudge")
@@ -337,25 +422,22 @@ def build_react_agent(cfg: Config):
         response = model.invoke([SystemMessage(sys_prompt)] + compacted)
         return {"messages": [response]}
 
-    tool_node = _build_tool_node(tools)
+    tool_node = _build_tool_node(tools, semantic_dedup_threshold=cfg.semantic_dedup_threshold)
 
     graph = StateGraph(AgentState)
     graph.add_node("model", model_node)
     graph.add_node("tools", tool_node)
     graph.add_node("fail_safe", fail_safe_node)
-    def _route_after_model(state) -> str:
-        if state.get("iterations", 0) >= cfg.recursion_limit - 2:
-            return "fail_safe"
-        if _count_tool_calls_since_last_human(state["messages"]) >= _BUDGET_HARD_CAP:
-            log.warning("[hard_cap] per-question tool-call cap hit; forcing fail_safe")
-            return "fail_safe"
-        last = state["messages"][-1]
-        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-            return "tools"
-        return END
+
+    def _router(state) -> str:
+        return _route_after_model(
+            state,
+            recursion_limit=cfg.recursion_limit,
+            budget_hard_cap=cfg.budget_hard_cap,
+        )
 
     graph.set_entry_point("model")
-    graph.add_conditional_edges("model", _route_after_model, {"tools": "tools", "fail_safe": "fail_safe", END: END})
+    graph.add_conditional_edges("model", _router, {"tools": "tools", "fail_safe": "fail_safe", END: END})
     graph.add_edge("tools", "model")
     graph.add_edge("fail_safe", END)
 

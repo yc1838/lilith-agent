@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool as tool_decorator
 
-from lilith_agent.app import _build_tool_node, _route_after_model
+from lilith_agent.app import _build_tool_node, _cooldown_limit_for, _route_after_model
 
 
 @tool_decorator
@@ -84,6 +84,37 @@ def test_tool_node_handles_unknown_tool_name():
     msg = out["messages"][0]
     assert isinstance(msg, ToolMessage)
     assert "unknown tool" in msg.content.lower()
+
+
+def test_dedup_does_not_emit_warning_level_logs(caplog):
+    """Routine dedup fires on many turns; WARNING floods stderr during normal runs.
+
+    Regression guard: `[dedup]`, `[semantic_dedup]`, `[loop_breaker]` stay at INFO."""
+    import logging
+
+    node = _build_tool_node([echo_tool])
+    prior_call = {"id": "old", "name": "echo_tool", "args": {"text": "x"}}
+    state = {"messages": [
+        HumanMessage(content="go"),
+        _ai_with_calls([prior_call]),
+        ToolMessage(tool_call_id="old", name="echo_tool", content="done"),
+        _ai_with_calls([{"id": "new", "name": "echo_tool", "args": {"text": "x"}}]),
+    ]}
+
+    with caplog.at_level(logging.DEBUG, logger="lilith_agent.app"):
+        node(state)
+
+    for rec in caplog.records:
+        if "[dedup]" in rec.getMessage() or "[semantic_dedup]" in rec.getMessage() or "[loop_breaker]" in rec.getMessage():
+            assert rec.levelno < logging.WARNING, f"routine guard log at {rec.levelname}: {rec.message}"
+
+
+def test_cooldown_limit_for_known_tool_is_positive_int():
+    """Each tool must declare a positive cooldown limit. Regression guard
+    against the `3 if name == 'web_search' else 3` no-op ternary."""
+    limit = _cooldown_limit_for("web_search")
+    assert isinstance(limit, int) and limit > 0
+    assert _cooldown_limit_for("fetch_url") == _cooldown_limit_for("web_search")
 
 
 def test_tool_node_catches_tool_exceptions_and_feeds_back():
