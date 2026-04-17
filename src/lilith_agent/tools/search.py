@@ -4,6 +4,12 @@ from ddgs import DDGS
 from tavily import TavilyClient, UsageLimitExceededError
 from tavily.errors import ForbiddenError
 
+_SEARCH_RECOVERY_HINT = (
+    "SEARCH_HINT: no useful results. Try: (1) rephrase with alternative keywords or narrower scope; "
+    "(2) for academic/scientific queries, use arxiv_search or crossref_search; "
+    "(3) for removed or historical pages, search via https://web.archive.org."
+)
+
 
 def _ddg_search(query: str, max_results: int) -> str:
     results = DDGS().text(query, max_results=max_results)
@@ -26,17 +32,19 @@ def web_search(query: str, api_key: str, max_results: int = 5) -> str:
 
     # 2. Fallback to Tavily if DDG failed or returned nothing
     if not api_key:
-        return f"[Source: DuckDuckGo (Empty)]\n{ddg_results}\n[Tavily fallback skipped: no key]"
-        
+        return f"[Source: DuckDuckGo (Empty)]\n{ddg_results}\n[Tavily fallback skipped: no key]\n{_SEARCH_RECOVERY_HINT}"
+
     client = TavilyClient(api_key=api_key)
     try:
         res = client.search(query=query, max_results=max_results)
         lines: list[str] = []
         for item in res.get("results", []):
             lines.append(f"- {item['title']} ({item['url']})\n  {item['content']}")
-        tavily_results = "\n".join(lines) if lines else "No results."
+        if not lines:
+            return f"[Source: Tavily (DDG fallback: {ddg_results})]\nNo results.\n{_SEARCH_RECOVERY_HINT}"
+        tavily_results = "\n".join(lines)
         return f"[Source: Tavily (DDG fallback: {ddg_results})]\n{tavily_results}"
     except (UsageLimitExceededError, ForbiddenError) as e:
-        return f"[Source: DuckDuckGo (Empty)]\n{ddg_results}\n[Tavily fallback failed: limit/forbidden: {e}]"
+        return f"[Source: DuckDuckGo (Empty)]\n{ddg_results}\n[Tavily fallback failed: limit/forbidden: {e}]\n{_SEARCH_RECOVERY_HINT}"
     except Exception as e:
-        return f"[Source: DuckDuckGo (Empty)]\n{ddg_results}\n[Tavily fallback failed: {e}]"
+        return f"[Source: DuckDuckGo (Empty)]\n{ddg_results}\n[Tavily fallback failed: {e}]\n{_SEARCH_RECOVERY_HINT}"
