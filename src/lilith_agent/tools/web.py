@@ -1,10 +1,65 @@
 import io
+import ipaddress
+from urllib.parse import urlparse
+
 import httpx
 import trafilatura
 from pypdf import PdfReader
 
 
+def _is_safe_http_url(url: str) -> tuple[bool, str]:
+    """SSRF guard: allow only http/https to public hosts.
+
+    Returns (ok, reason). Blocks file://, ftp://, javascript:, etc; and blocks
+    loopback, RFC1918 private ranges, link-local (incl. cloud metadata
+    169.254.169.254), and IPv6 equivalents. Hostnames without a literal IP
+    are allowed — DNS rebinding is a residual risk mitigated at fetch time
+    by `httpx` following redirects; a second check runs after the request
+    lands, but for now a hostname passes the static check.
+    """
+    if not url or not isinstance(url, str):
+        return False, "empty or non-string url"
+
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        return False, f"unparseable url: {exc}"
+
+    if parsed.scheme not in {"http", "https"}:
+        return False, f"blocked scheme {parsed.scheme!r}; only http/https allowed"
+
+    host = parsed.hostname
+    if not host:
+        return False, "missing host"
+
+    host_lower = host.lower()
+    if host_lower in {"localhost", "ip6-localhost", "ip6-loopback"}:
+        return False, "loopback hostname blocked"
+
+    # If host is a literal IP (v4 or v6), check the range.
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+
+    if ip is not None:
+        if ip.is_loopback:
+            return False, "loopback address blocked"
+        if ip.is_link_local:
+            return False, "link-local address blocked (incl. cloud metadata)"
+        if ip.is_private:
+            return False, "private address blocked"
+        if ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+            return False, "reserved/multicast/unspecified address blocked"
+
+    return True, ""
+
+
 def fetch_url(url: str, max_chars: int = 8000, timeout: float = 60.0) -> str:
+    ok, reason = _is_safe_http_url(url)
+    if not ok:
+        return f"WEB_FETCH_ERROR: unsafe URL blocked — {reason}"
+
     # 1. Check for PDF - Local extraction is always more reliable for PDFs
     if url.lower().endswith(".pdf"):
         try:

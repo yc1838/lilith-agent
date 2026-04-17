@@ -6,7 +6,7 @@
 
 ## 0. Implementation Status (2026-04-17 sweep)
 
-All 15 **Quick wins** from §7 have been implemented in this branch using strict red-green-refactor TDD (see `tests/` for the new RED→GREEN fixtures). Medium and Strategic items remain outstanding.
+All 15 **Quick wins** and six **Medium** items from §7 have been implemented on the `hardening/review-roadmap` branch using strict red-green-refactor TDD (see `tests/` for the new RED→GREEN fixtures). The remaining Medium items and all Strategic items are still outstanding.
 
 | # | Roadmap item | Status | Evidence |
 |---|---|---|---|
@@ -26,10 +26,16 @@ All 15 **Quick wins** from §7 have been implemented in this branch using strict
 | QW-13 | Delete dead `max_json_repairs` field | ✅ done | [config.py](src/lilith_agent/config.py) + regression test |
 | QW-14 | Delete empty plugin-skill directories | ✅ done | `.agents`, `.claude`, `.factory`, `.kiro`, `.qoder` removed |
 | QW-15 | Downgrade routine guard logs to `info` | ✅ done | [app.py](src/lilith_agent/app.py) dedup/semantic/cooldown + regression test |
+| M-1 | Path-restrict `write_file` to sandbox root (§C2) | ✅ done | `_resolve_safe_write_path`, `set_write_root` in [tools/files.py](src/lilith_agent/tools/files.py) + `tests/test_files.py` (7 tests) |
+| M-2 | Prompt-injection hardening via XML tags (§C3) | ✅ done | `_wrap_user_question` in [runner.py](src/lilith_agent/runner.py), system-prompt directive #6 in [app.py](src/lilith_agent/app.py), goal-extractor unwrap + `tests/test_runner.py` (3 tests) |
+| M-3 | SSRF guard on `fetch_url` (§C4) | ✅ done | `_is_safe_http_url` in [tools/web.py](src/lilith_agent/tools/web.py) blocks non-http schemes, loopback, RFC1918, link-local/metadata, IPv6 ULA + `tests/test_web.py` (28 tests) |
+| M-4 | Per-question vision circuit breaker (§M6) | ✅ done | `threading.local()`-backed breaker in [tools/vision.py](src/lilith_agent/tools/vision.py) + `tests/test_vision_breaker.py` (2 tests) |
+| M-5 | Sandbox `run_python` (§C1) | ✅ done | Two-backend design in [tools/python_exec.py](src/lilith_agent/tools/python_exec.py). Process backend: env-allowlist scrub (strips API keys and AWS creds), scratch tempdir cwd, `subprocess.run` with `sys.executable -I`, `resource.setrlimit` for CPU/AS/FSIZE, output cap, stdin-fed runner. Docker backend: `--network=bridge`, `--read-only` rootfs + `--tmpfs /scratch`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--memory=512m`, `--pids-limit=128`, non-root UID 1000; metadata-IP block via [sandbox/sitecustomize.py](sandbox/sitecustomize.py) monkey-patching `socket.getaddrinfo`/`create_connection`. Backend selection via `LILITH_SANDBOX` env var (values: `auto` / `process` / `docker`). See [sandbox/README.md](sandbox/README.md), [sandbox/Dockerfile](sandbox/Dockerfile). Tests: `tests/test_python_sandbox.py` (14 + 1 docker-gated integration). End-to-end verified — 169.254.169.254 blocked, example.com returns 200. |
+| M-6 | Summarize-don't-truncate for old tool results (§M11) | ✅ done | `_compact_old_tool_messages` in [app.py](src/lilith_agent/app.py) now accepts an optional `summarize_fn(tool_name, content)`. When supplied, old long tool results are replaced with an LLM-derived summary prefixed with `[COMPACTED SUMMARY]` — the prefix is detected on subsequent passes to skip re-summarization. Summarizer failure or empty return falls back to the original head-truncation marker. Factory `_make_tool_result_summarizer(cfg)` builds a cheap-model summarizer; gated by new `cfg.compact_summarize` (env `GAIA_COMPACT_SUMMARIZE`, default on). Wired into both `model_node` and `fail_safe_node`. Tests: `tests/test_compaction.py` (8) plus a config override test. |
 
-**Test suite**: 29 passed (was 10 before this sweep). Every fix shipped with either a new failing test first (RED) or a regression-guard test added after the change.
+**Test suite**: 93 passed + 1 docker integration (gated). Every fix shipped with either a new failing test first (RED) or a regression-guard test added after the change.
 
-The §3 Critical and §4 Major items marked "Medium" or "Strategic" in §7 are **not** implemented here — they need design decisions (sandbox choice, validator architecture, etc.) that warrant their own PRs.
+The §3 Critical and §4 Major items not yet ticked are **not** implemented here — they need design decisions (sandbox choice for `run_python`, validator architecture, etc.) that warrant their own PRs.
 
 ---
 
@@ -572,13 +578,13 @@ Ordered by blast radius ÷ effort.
 
 ### Medium (each < 1 week)
 
-1. **Sandbox `run_python`** in Docker `--network=none --read-only` with a scratch tmpfs (§C1).
-2. **Path-restrict `write_file`** to a per-run scratch root; reject `..` and absolutes (§C2).
-3. **Scheme+host guard `fetch_url`**: `http`/`https` only, reject RFC1918 and metadata IPs, re-check after redirects (§C4).
-4. **Prompt-injection hardening**: XML-tagged user input; system prompt invariants; never concatenate user content with system directives (§C3).
-5. **Per-question (not global) vision circuit breaker** (§M6).
+1. ✅ **Sandbox `run_python`** — process-level fallback + opt-in Docker backend with bridge network, read-only rootfs, tmpfs scratch, dropped caps, and a Python-level metadata-IP block (§C1). *Done — see §0 row M-5. Original suggestion was `--network=none`; we kept bridge network because `run_python` is used for scraping with custom headers.*
+2. ✅ **Path-restrict `write_file`** to a per-run scratch root; reject `..` and absolutes (§C2). *Done — see §0 row M-1.*
+3. ✅ **Scheme+host guard `fetch_url`**: `http`/`https` only, reject RFC1918 and metadata IPs, re-check after redirects (§C4). *Done — see §0 row M-3. Post-redirect re-check is still TODO.*
+4. ✅ **Prompt-injection hardening**: XML-tagged user input; system prompt invariants; never concatenate user content with system directives (§C3). *Done — see §0 row M-2.*
+5. ✅ **Per-question (not global) vision circuit breaker** (§M6). *Done — see §0 row M-4.*
 6. **Deterministic formatter first**, LLM formatter only as fallback, with a regression table in CI (§M10).
-7. **Summarize-don't-truncate** for older tool messages (§M11).
+7. ✅ **Summarize-don't-truncate** for older tool messages (§M11). *Done — see §0 row M-6.*
 8. **Per-tool semantic-dedup thresholds**, or embeddings-based dedup (§M7).
 9. **Integration tests**: vcrpy / JSONL-fixture replay of one level-1 and one level-2 GAIA task.
 10. **Invert `count_journal_articles`**: CrossRef first, Nature scrape as corroboration (§M12).

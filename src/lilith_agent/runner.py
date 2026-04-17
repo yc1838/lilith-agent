@@ -17,6 +17,19 @@ _TRACE_TOOL_OUTPUT_MAX = 400  # chars per tool result kept in reasoning_trace
 _TRACE_AI_TEXT_MAX = 800      # chars per AI message text kept in reasoning_trace
 
 
+def _wrap_user_question(text: str) -> str:
+    """Wrap untrusted user/benchmark text in an XML-style delimiter.
+
+    Scrubs inner `<gaia_question>` / `</gaia_question>` occurrences so an
+    adversarial question can't close the wrapper early and inject a fake
+    system section. Paired with a system-prompt assertion that the model
+    should treat only text inside the single outer tag pair as the task.
+    """
+    safe = text.replace("</gaia_question>", "&lt;/gaia_question&gt;")
+    safe = safe.replace("<gaia_question>", "&lt;gaia_question&gt;")
+    return f"<gaia_question>\n{safe}\n</gaia_question>"
+
+
 def _write_checkpoint_atomic(path: Path, data: dict) -> None:
     """Serialize first, then rename. A crash mid-serialize leaves the prior file intact.
 
@@ -108,7 +121,7 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
                 pass
 
         state = {
-            "messages": [HumanMessage(content=prompt)],
+            "messages": [HumanMessage(content=_wrap_user_question(prompt))],
             "iterations": 0
         }
         

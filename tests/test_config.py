@@ -32,3 +32,11 @@ def test_budget_knobs_are_env_overridable(monkeypatch):
     assert cfg.budget_hard_cap == 7
     assert cfg.budget_warn_at == 3
     assert abs(cfg.semantic_dedup_threshold - 0.8) < 1e-9
+
+
+def test_compact_summarize_defaults_on_and_is_env_overridable(monkeypatch):
+    monkeypatch.delenv("GAIA_COMPACT_SUMMARIZE", raising=False)
+    assert Config.from_env().compact_summarize is True
+
+    monkeypatch.setenv("GAIA_COMPACT_SUMMARIZE", "false")
+    assert Config.from_env().compact_summarize is False

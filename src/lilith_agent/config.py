@@ -47,6 +47,7 @@ class Config:
     budget_hard_cap: int = 25
     budget_warn_at: int = 15
     semantic_dedup_threshold: float = 0.5
+    compact_summarize: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -75,4 +76,5 @@ class Config:
             budget_hard_cap=_get_int_env("GAIA_BUDGET_HARD_CAP", "25"),
             budget_warn_at=_get_int_env("GAIA_BUDGET_WARN_AT", "15"),
             semantic_dedup_threshold=_get_float_env("GAIA_SEMANTIC_DEDUP_THRESHOLD", "0.5"),
+            compact_summarize=os.getenv("GAIA_COMPACT_SUMMARIZE", "true").lower() == "true",
         )

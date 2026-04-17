@@ -1,6 +1,7 @@
 import base64
 import logging
 import os
+import threading
 from pathlib import Path
 
 import httpx
@@ -11,15 +12,26 @@ from lilith_agent.config import Config
 
 log = logging.getLogger(__name__)
 
-_vision_session_failed: bool = False
+# Per-thread circuit breaker. Module-global state was wrong: a vision failure
+# in one concurrent run would poison every other run in the same process.
+_vision_state = threading.local()
 
-def reset_vision_state():
-    global _vision_session_failed
-    _vision_session_failed = False
+
+def _is_vision_breaker_tripped() -> bool:
+    return getattr(_vision_state, "tripped", False)
+
+
+def _trip_vision_breaker() -> None:
+    _vision_state.tripped = True
+
+
+def reset_vision_state() -> None:
+    _vision_state.tripped = False
+
+
 def inspect_visual_content(file_path_or_url: str, prompt: str, cfg: Config) -> str:
     """Analyze image/video with remapping and prioritized fallback logic."""
-    global _vision_session_failed
-    if _vision_session_failed:
+    if _is_vision_breaker_tripped():
         return ("Vision services are unavailable for this session. "
                 "All providers failed on a previous attempt. "
                 "Try alternative approaches (web_search for image descriptions, etc.).")
@@ -116,8 +128,8 @@ def inspect_visual_content(file_path_or_url: str, prompt: str, cfg: Config) -> s
         ultimate_res = _call_vision("gemini-3-flash-preview", "google", b64_data, mime_type, content)
         if not ultimate_res.startswith("ERROR:"):
             return ultimate_res
-        _vision_session_failed = True
+        _trip_vision_breaker()
         return f"All Vision Attempts Failed. Final Error: {ultimate_res}"
-    
-    _vision_session_failed = True
+
+    _trip_vision_breaker()
     return f"All Vision Attempts Failed. Final Error: {res2}"

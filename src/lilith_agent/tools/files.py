@@ -7,6 +7,43 @@ from docx import Document
 from pypdf import PdfReader
 
 
+# Agent writes are confined to this directory. Defaults to `.lilith/scratch`
+# under the CWD; override with set_write_root() at startup if you want a
+# per-run tmpfs-style root. The LLM must not be able to change this.
+_WRITE_ROOT: Path = Path(".lilith/scratch").resolve()
+
+
+def set_write_root(root: str | Path) -> None:
+    """Set the sandboxed root directory for write_file. Call once at startup."""
+    global _WRITE_ROOT
+    _WRITE_ROOT = Path(root).resolve()
+    _WRITE_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def _resolve_safe_write_path(path: str) -> Path:
+    """Resolve `path` against the write root. Raises ValueError on unsafe input.
+
+    Rejects absolute paths and any relative path that resolves outside the root
+    (e.g. via `..`). Returns a fully resolved Path inside the root.
+    """
+    if not isinstance(path, str) or not path:
+        raise ValueError("path must be a non-empty string")
+
+    p = Path(path)
+    if p.is_absolute():
+        raise ValueError(f"absolute paths are not allowed: {path!r}")
+
+    root = _WRITE_ROOT.resolve()
+    candidate = (root / p).resolve()
+
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise ValueError(f"path would escape write root: {path!r}")
+
+    return candidate
+
+
 def read_file(
     path: str, 
     start_line: Optional[int] = None, 
@@ -123,11 +160,19 @@ def glob_files(pattern: str, root_dir: str = ".") -> str:
 
 
 def write_file(path: str, content: str) -> str:
-    """Write content to a file. Used for offloading context or saving intermediate results."""
-    p = Path(path)
+    """Write content to a file inside the sandboxed write root.
+
+    The agent may only write under the configured write root (default
+    `.lilith/scratch`). Absolute paths and `..`-escapes are rejected.
+    """
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-        return f"Successfully wrote {len(content)} characters to {path}."
+        safe = _resolve_safe_write_path(path)
+    except ValueError as exc:
+        return f"ERROR writing to {path}: {exc}"
+
+    try:
+        safe.parent.mkdir(parents=True, exist_ok=True)
+        safe.write_text(content, encoding="utf-8")
+        return f"Successfully wrote {len(content)} characters to {safe}."
     except Exception as e:
         return f"ERROR writing to {path}: {e}"
