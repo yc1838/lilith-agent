@@ -22,6 +22,14 @@ from lilith_agent.config import Config
 from lilith_agent.models import get_cheap_model, get_extra_strong_model
 
 log = logging.getLogger(__name__)
+# Per-node child loggers so the logger-name column reads `lilith_agent.nodes.X`
+# and traces read like the gaia_agent reference output (`[model] invoking ...`,
+# `[tools] calling tool=...`). Keeps routing/compaction logs on `lilith_agent.app`.
+log_model = logging.getLogger("lilith_agent.nodes.model")
+log_tools = logging.getLogger("lilith_agent.nodes.tools")
+log_fail_safe = logging.getLogger("lilith_agent.nodes.fail_safe")
+_TOOL_ARG_PREVIEW_CHARS = 240
+_TOOL_RESULT_PREVIEW_CHARS = 240
 
 
 
@@ -284,6 +292,12 @@ def _build_tool_node(
         messages = state["messages"]
         last = messages[-1]
         tool_calls = getattr(last, "tool_calls", None) or []
+        if tool_calls:
+            log_tools.info(
+                "[tools] dispatching %d call(s): %s",
+                len(tool_calls),
+                [tc.get("name") for tc in tool_calls],
+            )
 
         # "seen" = calls that appeared in AIMessages strictly BEFORE the current one.
         seen = _collect_seen_calls(messages[:-1])
@@ -378,16 +392,29 @@ def _build_tool_node(
                 continue
 
             try:
+                args_preview = json.dumps(args, ensure_ascii=False, default=str)
+            except Exception:
+                args_preview = repr(args)
+            if len(args_preview) > _TOOL_ARG_PREVIEW_CHARS:
+                args_preview = args_preview[:_TOOL_ARG_PREVIEW_CHARS] + "…"
+            log_tools.info("[tools] calling tool=%s args=%s", name, args_preview)
+
+            try:
                 out = tool.invoke(args)
             except Exception as e:
-                log.warning("[tool_node] %s raised: %s", name, e)
+                log_tools.warning("[tools] %s raised: %s", name, e)
                 out = f"ERROR: {type(e).__name__}: {e}"
                 if len(out) > 1000:
                     out = out[:1000] + "\n...[TRUNCATED BY SYSTEM TO PREVENT CONTEXT COLLAPSE]..."
                 results.append(ToolMessage(tool_call_id=tc_id, name=name, content=str(out), status="error"))
                 continue
 
-            results.append(ToolMessage(tool_call_id=tc_id, name=name, content=str(out)))
+            out_str = str(out)
+            preview = out_str.replace("\n", " ")
+            if len(preview) > _TOOL_RESULT_PREVIEW_CHARS:
+                preview = preview[:_TOOL_RESULT_PREVIEW_CHARS] + "…"
+            log_tools.info("[tools] tool result (%d chars): %s", len(out_str), preview)
+            results.append(ToolMessage(tool_call_id=tc_id, name=name, content=out_str))
 
         return {"messages": results}
 
@@ -487,30 +514,56 @@ def build_react_agent(cfg: Config):
             ))
         prompt_msgs += compacted
 
+        iteration = state.get("iterations", 0)
+        log_model.info(
+            "[model] invoking iter=%d tool_calls_so_far=%d msgs=%d",
+            iteration,
+            tool_calls_this_turn,
+            len(compacted),
+        )
         response = model.invoke(prompt_msgs)
-        
+
         # Clean up Gemini signatures and unhelpful metadata to reduce log noise and context bloat
         if hasattr(response, "additional_kwargs"):
             response.additional_kwargs.pop("__gemini_function_call_thought_signatures__", None)
             # Remove function_call duplicate if it exists in additional_kwargs (redundant with tool_calls)
             response.additional_kwargs.pop("function_call", None)
-            
+
         if hasattr(response, "response_metadata"):
             response.response_metadata = _strip_response_metadata_noise(response.response_metadata)
-            
+
         # Fallback for empty responses
         if not response.content and not getattr(response, "tool_calls", None):
-            log.warning("[model_node] blank response detected; injecting system nudge")
+            log_model.warning("[model] blank response detected; injecting system nudge")
             response = AIMessage(content=(
                 "SYSTEM: Your previous response was empty. If you have enough information, "
                 "provide a 'Final Answer:'. If you are stuck, return a best guess based on "
                 "available snippets or explain why you cannot complete the task."
             ))
+        else:
+            requested = [tc.get("name") for tc in (getattr(response, "tool_calls", None) or [])]
+            if requested:
+                log_model.info("[model] requested tool_calls=%s", requested)
+            else:
+                content_text = response.content
+                if isinstance(content_text, list):
+                    content_text = "".join(
+                        c.get("text", "") for c in content_text
+                        if isinstance(c, dict) and c.get("type") == "text"
+                    )
+                content_text = str(content_text or "").strip().replace("\n", " ")
+                if len(content_text) > _TOOL_RESULT_PREVIEW_CHARS:
+                    content_text = content_text[:_TOOL_RESULT_PREVIEW_CHARS] + "…"
+                log_model.info("[model] finished content=%r", content_text)
 
-        return {"messages": [response], "iterations": state.get("iterations", 0) + 1}
+        return {"messages": [response], "iterations": iteration + 1}
 
     def fail_safe_node(state):
         from langchain_core.messages import SystemMessage
+        log_fail_safe.warning(
+            "[fail_safe] emergency override: iter=%d",
+            state.get("iterations", 0),
+        )
         sys_prompt = (
             "SYSTEM EMERGENCY OVERRIDE: You have hit the absolute maximum iteration limit for this task. "
             "You are FORCED to stop. Provide a brief 'Final Answer:' summarizing what you have tried, "

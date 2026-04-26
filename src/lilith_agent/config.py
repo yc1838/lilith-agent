@@ -48,6 +48,7 @@ class Config:
     budget_warn_at: int = 15
     semantic_dedup_threshold: float = 0.5
     compact_summarize: bool = True
+    llm_formatter_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -77,4 +78,5 @@ class Config:
             budget_warn_at=_get_int_env("GAIA_BUDGET_WARN_AT", "15"),
             semantic_dedup_threshold=_get_float_env("GAIA_SEMANTIC_DEDUP_THRESHOLD", "0.5"),
             compact_summarize=os.getenv("GAIA_COMPACT_SUMMARIZE", "true").lower() == "true",
+            llm_formatter_enabled=os.getenv("GAIA_LLM_FORMATTER_ENABLED", "true").lower() == "true",
         )

@@ -52,6 +52,19 @@ def build_tools(cfg: Config) -> list[BaseTool]:
     @tool
     def run_python(code: str, timeout: int = 30) -> str:
         """Run Python code in a sandboxed subprocess and return stdout + last expression.
+
+        ISOLATED FROM THE HOST FILESYSTEM. This tool runs inside a container (or a
+        scrubbed subprocess with cwd pinned to a throwaway tmpdir). It CANNOT open
+        files from the user's workspace — paths like './notes.md', '.lilith/...',
+        or any relative path resolve against the sandbox's own empty scratch dir,
+        not the repo. Any file written here vanishes when the call returns.
+
+        To move data across the boundary:
+        - To READ a workspace file, call `read_file` first and pass the returned
+          text into `run_python` as a string literal in `code`.
+        - To PERSIST output the user can see, call `write_file` — do NOT try to
+          write from inside `run_python`.
+
         AVAILABLE LIBRARIES: requests, beautifulsoup4 (bs4), pandas, trafilatura, openpyxl, faster-whisper, pypdf.
         CRITICAL: If you use this tool to scrape websites, you MUST include a 'User-Agent' header.
         Example: headers = {'User-Agent': 'Mozilla/5.0...'}
@@ -80,7 +93,16 @@ def build_tools(cfg: Config) -> list[BaseTool]:
 
     @tool
     def write_file(path: str, content: str) -> str:
-        """Write content to a file. Use this to save intermediate results or large summaries."""
+        """Persist text to a file the user can open afterwards.
+
+        This is the ONLY tool that writes to the user's workspace. `run_python`
+        runs in an isolated sandbox with no host-filesystem access, so files it
+        creates are lost when the call returns — always route persisted output
+        through this tool instead.
+
+        `path` is relative to the agent's write root (`.lilith/scratch` by
+        default); absolute paths and `..`-escapes are rejected.
+        """
         return _write_file(path, content)
 
     @tool

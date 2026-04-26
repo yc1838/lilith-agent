@@ -46,6 +46,32 @@ CASES: list[Case] = [
          "I found that the total number of papers published was 127 in 2019",
          "I found that the total number of papers published was 127 in 2019",
          True),
+
+    # ---- Final-Answer tail extraction (the real GAIA regression pattern) ----
+    # When a model produces a verbose preamble followed by `Final Answer: X`,
+    # take X and drop the preamble. This is what the LLM formatter USED to do
+    # unreliably — the deterministic layer now handles it safely.
+    Case("tail_simple",
+         "Some reasoning about it.\n\nFinal Answer: 142",
+         "142", False),
+    Case("tail_with_markdown",
+         "**The object** is *Tritia gibbosula*, dated to 142 thousand years.\n\nFinal Answer: 142",
+         "142", False),
+    Case("tail_multi_word",
+         "Based on the spreadsheet, the oldest title is shown below.\n\nFinal Answer: Time-Parking 2: Parallel Universe",
+         "Time-Parking 2: Parallel Universe", False),
+    Case("tail_case_insensitive",
+         "Long reasoning paragraph.\n\nfinal answer: egalitarian",
+         "egalitarian", False),
+    Case("tail_last_wins",
+         "Preliminary guess — Final Answer: 41.\nOn re-check it's actually 42.\nFinal Answer: 42",
+         "42", False),
+    Case("tail_bold_wrapper",
+         "Reasoning...\n\nFinal Answer: **Paris**",
+         "Paris", False),
+    Case("tail_trailing_period",
+         "Reasoning concluded.\n\nFinal Answer: dot.",
+         "dot.", False),
 ]
 
 _CASE_IDS = [c.id for c in CASES]

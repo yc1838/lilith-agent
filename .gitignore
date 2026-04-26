@@ -9,3 +9,4 @@ src/lilith_agent/__pycache__/
 submission.jsonl
 anatomy.pdf
 anatomy_full.pdf
+*.csv

@@ -141,9 +141,14 @@ def test_docker_backend_argv_contains_isolation_flags(monkeypatch):
     assert "--read-only" in argv
     assert "--cap-drop=ALL" in argv
     assert "--security-opt=no-new-privileges" in argv
-    # tmpfs mount for /scratch
+    # tmpfs mount for /sandbox, mounted mode=1777 so the non-root container user can write.
     tmpfs_idx = argv.index("--tmpfs")
-    assert argv[tmpfs_idx + 1].startswith("/scratch")
+    tmpfs_spec = argv[tmpfs_idx + 1]
+    assert tmpfs_spec.startswith("/sandbox")
+    assert "mode=1777" in tmpfs_spec
+    # cwd is /sandbox (the tmpfs); /scratch is a user workspace dir name and must not be used
+    w_idx = argv.index("-w")
+    assert argv[w_idx + 1] == "/sandbox"
     # memory + cpu caps present
     assert any(a.startswith("--memory=") for a in argv)
     assert any(a.startswith("--pids-limit=") for a in argv)

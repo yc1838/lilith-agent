@@ -189,14 +189,17 @@ class JsonlTraceCallback(BaseCallbackHandler):
         line = json.dumps(record, default=repr)
         self._fh.write(line + "\n")
         self._fh.flush()
-        # Real-time mirror: short summary line to the logger (which lands in the .log file).
+        # Mirror at DEBUG: LangGraph emits nested chain_start/chain_end for every
+        # subgraph, which floods the console at INFO. Full payloads still live in
+        # the .jsonl file; errors stay visible because we log them at WARNING.
         summary = f"{record['event']}"
         for k in ("name", "model", "elapsed_s"):
             if k in record:
                 summary += f" {k}={record[k]}"
         if "error" in record:
-            summary += f" error={record['error']}"
-        self._logger.info(summary)
+            self._logger.warning("%s error=%s", summary, record["error"])
+        else:
+            self._logger.debug(summary)
 
     # --- chain (LangGraph node) boundaries ---
     def on_chain_start(self, serialized, inputs, *, run_id=None, **kwargs):

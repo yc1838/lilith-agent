@@ -83,15 +83,39 @@ def test_jsonl_callback_captures_chain_boundaries(tmp_path):
     assert events[1]["elapsed_s"] >= 0
 
 
-def test_jsonl_callback_mirrors_to_logger(tmp_path, caplog):
+def test_jsonl_callback_mirrors_non_error_events_at_debug(tmp_path, caplog):
+    """Non-error LangGraph events are logged at DEBUG so they don't flood the console.
+
+    Keeping INFO clean was the whole point of the level demotion — the full payload
+    still lives in the .jsonl file, so the mirror is just a low-priority heartbeat.
+    """
     from lilith_agent.observability import JsonlTraceCallback
     import logging as _logging
 
     cb = JsonlTraceCallback(tmp_path / "trace.jsonl")
-    with caplog.at_level(_logging.INFO, logger="lilith_agent.trace"):
+    with caplog.at_level(_logging.DEBUG, logger="lilith_agent.trace"):
         cb.on_tool_start({"name": "tavily_search"}, "moon", run_id="r1")
 
-    assert any("tool_start" in r.message and "tavily_search" in r.message for r in caplog.records)
+    matches = [
+        r for r in caplog.records
+        if "tool_start" in r.getMessage() and "tavily_search" in r.getMessage()
+    ]
+    assert matches, "expected tool_start mirror record"
+    assert all(r.levelno == _logging.DEBUG for r in matches)
+
+
+def test_jsonl_callback_mirrors_errors_at_warning(tmp_path, caplog):
+    """Errors stay visible: mirrored at WARNING so they punch through the default cutoff."""
+    from lilith_agent.observability import JsonlTraceCallback
+    import logging as _logging
+
+    cb = JsonlTraceCallback(tmp_path / "trace.jsonl")
+    with caplog.at_level(_logging.WARNING, logger="lilith_agent.trace"):
+        cb.on_tool_error(RuntimeError("boom"), run_id="r1")
+
+    matches = [r for r in caplog.records if "tool_error" in r.getMessage()]
+    assert matches, "expected tool_error mirror record"
+    assert all(r.levelno == _logging.WARNING for r in matches)
 
 
 def test_jsonl_callback_writes_tool_and_llm_events(tmp_path):

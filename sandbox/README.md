@@ -14,7 +14,7 @@ Rebuild when you touch any file in this directory or change the library list in 
 
 | Layer | Mechanism |
 |---|---|
-| Filesystem | `--read-only` rootfs + `--tmpfs /scratch:size=128m,noexec,nosuid,nodev` as CWD. No bind-mount of the host. |
+| Filesystem | `--read-only` rootfs + `--tmpfs /sandbox:size=128m,mode=1777,noexec,nosuid,nodev` as CWD. No bind-mount of the host. |
 | Network | `--network=bridge` (outbound allowed; needed for scraping). Container is in its own netns — host's `localhost` is unreachable. Cloud-metadata `169.254.169.254` blocked at Python socket layer via [sitecustomize.py](sitecustomize.py). |
 | Privileges | `--cap-drop=ALL`, `--security-opt=no-new-privileges`, runs as UID 1000 (`sandbox` user). |
 | Resource | `--memory=512m --memory-swap=512m --cpus=1.0 --pids-limit=128`; inside Python, rlimits on CPU, address space, and max file size. |

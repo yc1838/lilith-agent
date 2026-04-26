@@ -21,7 +21,7 @@ COPY runner.py /app/runner.py
 RUN useradd --uid 1000 --create-home --shell /bin/false sandbox
 USER sandbox
 
-WORKDIR /scratch
+WORKDIR /sandbox
 
 # stdin → runner.py → stdout. No args means no secret surface in `ps`.
 ENTRYPOINT ["python", "-I", "/app/runner.py"]

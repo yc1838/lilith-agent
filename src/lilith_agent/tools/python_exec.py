@@ -5,7 +5,7 @@ LLM-generated code is untrusted. Two backends:
 - ``process`` (default, always works): subprocess with env scrubbed to an
   allowlist, cwd pinned to a per-call scratch tempdir, wall-clock timeout,
   output bounded, resource limits via rlimit on Unix.
-- ``docker``: container with bridge network, read-only rootfs + tmpfs /scratch,
+- ``docker``: container with bridge network, read-only rootfs + tmpfs /sandbox,
   ``--cap-drop=ALL``, ``--security-opt=no-new-privileges``, memory and pid
   caps. Metadata-IP block lives in the image's ``sitecustomize.py``.
 
@@ -151,7 +151,9 @@ def _run_docker_sandbox(
         "--network=bridge",
         "--read-only",
         "--tmpfs",
-        "/scratch:rw,size=128m,noexec,nosuid,nodev",
+        # mode=1777 so the non-root container user can write to the tmpfs;
+        # without it the default owner is root:root 755 and writes fail EACCES.
+        "/sandbox:rw,size=128m,mode=1777,noexec,nosuid,nodev",
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
         "--memory=512m",
@@ -159,7 +161,7 @@ def _run_docker_sandbox(
         "--cpus=1.0",
         "--pids-limit=128",
         "-w",
-        "/scratch",
+        "/sandbox",
         image,
     ]
 
