@@ -87,62 +87,46 @@ _store = MemoryStore()
 
 def extract_and_compress_facts(messages: List[BaseMessage], model) -> None:
     """
-    Extracts new facts and merges them with existing ones using an LLM.
-    Implements the 'Engram' / 'HCA' active compression pattern.
+    Extracts new facts and merges them with existing ones using langmem's manager.
+    Implements professional reflection and conflict resolution.
     """
-    log.info("[memory] Running active memory compression...")
+    from langmem import create_memory_manager
+    log.info("[memory] Running langmem memory management...")
     try:
-        existing_memories = _store.get_all_memories()
-        existing_str = json.dumps([m["content"] for m in existing_memories], indent=2, ensure_ascii=False)
-        
-        conv_parts = []
-        for m in messages:
-            role = "User" if isinstance(m, HumanMessage) else "Assistant"
-            if m.content:
-                content = m.content if isinstance(m.content, str) else str(m.content)
-                conv_parts.append(f"{role}: {content[:1000]}")
-        conv_str = "\n".join(conv_parts)
+        # 1. Get existing memories from our local store
+        existing_rows = _store.get_all_memories()
+        # langmem manager expects a list of dictionaries or objects matching the schema
+        existing_memories = [{"content": m["content"]} for m in existing_rows]
 
-        prompt = f"""
-You are Lilith's Long-Term Memory Manager. Your goal is to maintain a DENSE, ATOMIC, and ACCURATE set of facts about the user and the environment.
+        # 2. Initialize langmem manager (it's a Runnable)
+        # We use the default schema which is basically content strings
+        manager = create_memory_manager(model, enable_deletes=True)
 
-### CURRENT MEMORIES:
-{existing_str}
+        # 3. Invoke manager with history and existing knowledge
+        # The manager will return the full updated list of memories
+        result = manager.invoke({
+            "messages": messages,
+            "existing": existing_memories
+        })
 
-### RECENT CONVERSATION:
-{conv_str}
-
-### TASK:
-1. Identify any NEW persistent facts, preferences, or entities mentioned in the conversation.
-2. Update or resolve contradictions with EXISTING memories.
-3. REMOVE redundant or trivial memories.
-4. Keep the list concise and focused on high-signal information (e.g., user name, preferences, project details, API keys mentioned).
-
-Output the updated list of ALL persistent facts as a JSON array of strings.
-Example: ["User name is Alice", "Project uses Python 3.11"]
-If no changes or facts, return the existing list.
-"""
-        
-        response = model.invoke(prompt)
-        content = response.content
-        if isinstance(content, list): # Handle thinking models
-            content = content[-1].get("text", "") if isinstance(content[-1], dict) else str(content[-1])
-        
-        # Sane JSON extraction
-        try:
-            start = content.find("[")
-            end = content.rfind("]") + 1
-            if start != -1 and end > start:
-                facts = json.loads(content[start:end])
-                if isinstance(facts, list):
-                    updated = [{"content": f} for f in facts]
-                    _store.save_memories(updated)
-                    log.info(f"[memory] Saved {len(updated)} facts.")
-        except Exception as je:
-            log.warning(f"[memory] JSON parse failed: {je}")
+        # 4. Save results back to our local persistent SQLite
+        if isinstance(result, list):
+            # The result is a list of ExtractedMemory objects or tuples depending on version
+            # Usually it's (id, content) or just objects. We'll be robust here.
+            updated_facts = []
+            for item in result:
+                # result elements can be ExtractedMemory objects or simple dicts
+                content = getattr(item, "content", None) or (item[1] if isinstance(item, tuple) else item.get("content"))
+                if content:
+                    updated_facts.append({"content": str(content)})
+            
+            _store.save_memories(updated_facts)
+            log.info(f"[memory] langmem updated store to {len(updated_facts)} facts.")
 
     except Exception as e:
-        log.error(f"[memory] Extraction failed: {e}")
+        log.error(f"[memory] langmem extraction failed: {e}")
+        # Fallback to summarize episode if manager fails
+        summarize_episode(messages, model)
 
 def summarize_episode(messages: List[BaseMessage], model) -> None:
     """Summarizes the trajectory to help avoid future mistakes."""
