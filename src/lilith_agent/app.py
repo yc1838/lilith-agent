@@ -535,11 +535,11 @@ def build_react_agent(cfg: Config):
         response = model.invoke(prompt_msgs)
 
         # Clean up Gemini signatures and unhelpful metadata to reduce log noise and context bloat
-        # Note: Do not pop thought_signature or __gemini_function_call_thought_signatures__ 
-        # from additional_kwargs as Gemini strictly requires them to be passed back in subsequent tool calls.
+        # Note: We must preserve additional_kwargs EXACTLY as returned by Gemini.
+        # Popping 'function_call' or signatures will cause 400 errors in subsequent turns
+        # because Gemini requires these tokens/signatures to be echoed back in the history.
         if hasattr(response, "additional_kwargs"):
-            # Remove function_call duplicate if it exists in additional_kwargs (redundant with tool_calls)
-            response.additional_kwargs.pop("function_call", None)
+            pass # Keep everything including function_call and signatures
 
         if hasattr(response, "response_metadata"):
             response.response_metadata = _strip_response_metadata_noise(response.response_metadata)
