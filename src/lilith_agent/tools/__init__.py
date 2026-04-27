@@ -11,6 +11,7 @@ from lilith_agent.tools.files import (
     ls as _ls,
     grep as _grep,
     glob_files as _glob_files,
+    find_files as _find_files,
     write_file as _write_file
 )
 from lilith_agent.tools.todos import (
@@ -90,6 +91,11 @@ def build_tools(cfg: Config) -> list[BaseTool]:
     def glob_files(pattern: str) -> str:
         """Find files matching a glob pattern (e.g., '**/*.csv')."""
         return _glob_files(pattern)
+
+    @tool
+    def find_files(name: str, root: str = ".", max_results: int = 200) -> str:
+        """Locate files by name under `root` using unix `find` (fast deep search). Use this instead of walking with `ls` when looking for a known filename in a large tree."""
+        return _find_files(name, root=root, max_results=max_results)
 
     @tool
     def write_file(path: str, content: str) -> str:
@@ -190,6 +196,7 @@ def build_tools(cfg: Config) -> list[BaseTool]:
         ls,
         grep,
         glob_files,
+        find_files,
         write_file,
         write_todos,
         mark_todo_done,

@@ -1,4 +1,6 @@
-import fnmatch
+import glob as _glob
+import os
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -54,7 +56,7 @@ def read_file(
     Reads a file with optional line-based chunking.
     Used to prevent context overflow for large files.
     """
-    p = Path(path)
+    p = Path(os.path.expanduser(path))
     if not p.exists():
         return f"ERROR: File {path} does not exist."
     if not p.is_file():
@@ -102,7 +104,7 @@ def read_file(
 
 def ls(path: str = ".") -> str:
     """List contents of a directory."""
-    p = Path(path)
+    p = Path(os.path.expanduser(path))
     if not p.exists():
         return f"ERROR: Path {path} does not exist."
     if not p.is_dir():
@@ -120,7 +122,7 @@ def ls(path: str = ".") -> str:
 
 def grep(pattern: str, path: str, ignore_case: bool = True) -> str:
     """Search for a pattern in a file and return matching lines with line numbers."""
-    p = Path(path)
+    p = Path(os.path.expanduser(path))
     if not p.exists():
         return f"ERROR: File {path} does not exist."
     
@@ -144,19 +146,41 @@ def grep(pattern: str, path: str, ignore_case: bool = True) -> str:
 
 def glob_files(pattern: str, root_dir: str = ".") -> str:
     """Find files matching a glob pattern."""
-    p = Path(root_dir)
+    pattern = os.path.expanduser(pattern)
+    root_dir = os.path.expanduser(root_dir)
     try:
-        # Use rglob for recursive search if pattern starts with **/
-        if pattern.startswith("**/"):
-            matches = list(p.rglob(pattern[3:]))
+        if os.path.isabs(pattern):
+            matches = _glob.glob(pattern, recursive=True)
         else:
-            matches = list(p.glob(pattern))
-            
+            matches = _glob.glob(pattern, root_dir=root_dir, recursive=True)
+
         if not matches:
             return "No files found matching the pattern."
-        return "\n".join(str(m) for m in sorted(matches))
+        return "\n".join(sorted(matches))
     except Exception as e:
         return f"ERROR globbing {pattern}: {e}"
+
+
+def find_files(name: str, root: str = ".", max_results: int = 200) -> str:
+    """Locate files by name under `root` using unix `find`. Fast deep search."""
+    root = os.path.expanduser(root)
+    if not Path(root).exists():
+        return f"ERROR: Path {root} does not exist."
+    try:
+        result = subprocess.run(
+            ["find", str(root), "-name", name],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        lines = [ln for ln in result.stdout.splitlines() if ln]
+        if not lines:
+            return "No files found."
+        return "\n".join(lines[:max_results])
+    except subprocess.TimeoutExpired:
+        return "ERROR: find timed out (>30s)."
+    except Exception as e:
+        return f"ERROR: {e}"
 
 
 def write_file(path: str, content: str) -> str:
