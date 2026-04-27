@@ -8,7 +8,10 @@ from typing import Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+import sqlite3
+import os
+from pathlib import Path
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import MessagesState, add_messages
 from typing import Annotated, TypedDict
@@ -592,5 +595,13 @@ def build_react_agent(cfg: Config):
     graph.add_edge("tools", "model")
     graph.add_edge("fail_safe", END)
 
-    compiled = graph.compile(checkpointer=MemorySaver())
+    # Setup SQLite Saver
+    lilith_home = Path(os.getenv("LILITH_HOME", ".lilith"))
+    lilith_home.mkdir(parents=True, exist_ok=True)
+    db_path = lilith_home / "threads.sqlite"
+    
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    memory_saver = SqliteSaver(conn)
+
+    compiled = graph.compile(checkpointer=memory_saver)
     return compiled.with_config({"recursion_limit": cfg.recursion_limit})
