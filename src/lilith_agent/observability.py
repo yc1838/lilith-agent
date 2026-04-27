@@ -97,13 +97,10 @@ def setup_logging(log_dir: str | Path = ".lilith") -> Path:
 # Keys stripped from every trace record — high-volume, low-signal noise
 # from provider responses (Gemini reasoning traces, safety metadata, etc).
 _NOISE_KEYS = frozenset({
-    "__gemini_function_call_thought_signatures__",
     "reasoning",
     "signature",
     "safety_ratings",
     "safety_settings",
-    "thought_signature",
-    "thought_signatures",
 })
 
 
