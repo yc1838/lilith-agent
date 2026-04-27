@@ -74,27 +74,32 @@ def build_tools(cfg: Config) -> list[BaseTool]:
 
     @tool
     def read_file(path: str, start_line: Optional[int] = None, end_line: Optional[int] = None, max_chars: int = 20000) -> str:
-        """Read a local file with optional line-based chunking (start_line/end_line). Returns text."""
+        """Read a local file with optional line-based chunking (start_line/end_line). Returns text.
+        `path` accepts `~/...` for the user's home directory and absolute paths; reads the HOST filesystem (not the `run_python` sandbox)."""
         return _read_file(path, start_line=start_line, end_line=end_line, max_chars=max_chars)
 
     @tool
     def ls(path: str = ".") -> str:
-        """List contents of a directory. Use this to find available files."""
+        """List contents of a directory. Use this to find available files.
+        `path` accepts `~/...` for the user's home directory and absolute paths; lists the HOST filesystem (not the `run_python` sandbox)."""
         return _ls(path)
 
     @tool
     def grep(pattern: str, path: str) -> str:
-        """Search for a pattern in a file. Returns matching lines with line numbers."""
+        """Search for a pattern in a file. Returns matching lines with line numbers.
+        `path` accepts `~/...` for the user's home directory and absolute paths; searches the HOST filesystem (not the `run_python` sandbox)."""
         return _grep(pattern, path)
 
     @tool
     def glob_files(pattern: str) -> str:
-        """Find files matching a glob pattern (e.g., '**/*.csv')."""
+        """Find files matching a glob pattern (e.g., '**/*.csv').
+        `pattern` accepts `~/...` and absolute patterns (e.g. `/Users/me/code/**/*.py`); operates on the HOST filesystem (not the `run_python` sandbox)."""
         return _glob_files(pattern)
 
     @tool
     def find_files(name: str, root: str = ".", max_results: int = 200) -> str:
-        """Locate files by name under `root` using unix `find` (fast deep search). Use this instead of walking with `ls` when looking for a known filename in a large tree."""
+        """Locate files by name under `root` using unix `find` (fast deep search). Use this instead of walking with `ls` when looking for a known filename in a large tree.
+        `root` accepts `~/...` and absolute paths and operates on the HOST filesystem; NEVER pass `root='/'` (will time out scanning the whole disk) — start from a focused subtree like `~/code` or `~`. Default excludes already skip `node_modules`/`.git`/`.venv`/`__pycache__`/etc."""
         return _find_files(name, root=root, max_results=max_results)
 
     @tool

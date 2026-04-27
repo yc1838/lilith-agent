@@ -149,3 +149,21 @@ def test_find_files_truncation_sentinel(tmp_path: Path):
     out = find_files("*.txt", str(tmp_path), max_results=3)
     assert "[truncated:" in out
     assert "of 4" in out
+
+
+def test_filesystem_tool_descriptions_mention_tilde():
+    from lilith_agent.config import Config
+    from lilith_agent.tools import build_tools
+    cfg = Config.from_env()
+    tools_by_name = {t.name: t for t in build_tools(cfg)}
+    for name in ("read_file", "ls", "grep", "glob_files", "find_files"):
+        assert "~" in tools_by_name[name].description, f"{name} description must mention ~"
+
+
+def test_find_files_description_warns_against_root_slash():
+    from lilith_agent.config import Config
+    from lilith_agent.tools import build_tools
+    cfg = Config.from_env()
+    tools_by_name = {t.name: t for t in build_tools(cfg)}
+    desc = tools_by_name["find_files"].description
+    assert "/" in desc and ("never" in desc.lower() or "do not" in desc.lower())
