@@ -12,6 +12,41 @@ lilith_home = Path(os.getenv("LILITH_HOME", ".lilith"))
 # langmem.init(local_dir=str(lilith_home / "memory"))  # Placeholder, SDK API may vary
 
 
+def summarize_episode(messages: List[BaseMessage], model) -> None:
+    """
+    Summarizes the trajectory of the task to learn from past experiences.
+    """
+    log.info("[memory] Summarizing task episode...")
+    try:
+        # Extract the initial question
+        initial_question = ""
+        for m in messages:
+            if isinstance(m, HumanMessage):
+                initial_question = str(m.content)
+                break
+                
+        conv_str = "\n".join([f"{m.type}: {m.content[:200]}..." for m in messages if m.content])
+        
+        prompt = f"""
+        Summarize the trajectory of this task to help a future agent avoid mistakes and repeat successes.
+        Include:
+        1. Task description
+        2. Tools used and why
+        3. Errors encountered and how they were bypassed
+        4. Final outcome
+        
+        Initial Question: {initial_question}
+        Trajectory:
+        {conv_str}
+        """
+        
+        response = model.invoke(prompt)
+        
+        # Placeholder for langmem save_episode logic
+        log.info(f"[memory] Episode summarized: {response.content[:100]}...")
+    except Exception as e:
+        log.error(f"[memory] Failed to summarize episode: {e}")
+
 def extract_and_compress_facts(messages: List[BaseMessage], model) -> None:
     """
     Extracts new facts from the conversation and merges/compresses them
@@ -36,11 +71,11 @@ def extract_and_compress_facts(messages: List[BaseMessage], model) -> None:
         
         response = model.invoke(prompt)
         
-        # Placeholder for langmem save_fact logic depending on their local SDK version.
-        # In a full langmem cloud setup, you might use memory_manager.
-        # Here we just log it as a stub until local vector is fully set up.
+        # Placeholder for langmem save_fact logic
         log.info(f"[memory] Facts extracted: {response.content[:100]}...")
         
         log.info("[memory] Extraction complete.")
     except Exception as e:
         log.error(f"[memory] Failed to extract facts: {e}")
+        
+    summarize_episode(messages, model)
