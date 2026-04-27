@@ -79,3 +79,26 @@ def extract_and_compress_facts(messages: List[BaseMessage], model) -> None:
         log.error(f"[memory] Failed to extract facts: {e}")
         
     summarize_episode(messages, model)
+
+def retrieve_relevant_context(query: str) -> str:
+    """
+    Queries the semantic and episodic memory banks for relevant facts and past experiences.
+    """
+    try:
+        # Placeholder for actual langmem SDK sparse retrieval:
+        # facts = langmem.search_facts(query, top_k=3)
+        # episodes = langmem.search_episodes(query, top_k=1)
+        
+        facts = [] # stub
+        episodes = [] # stub
+        
+        context_parts = []
+        if facts:
+            context_parts.append("<relevant_facts>\n" + "\n".join(f"- {f}" for f in facts) + "\n</relevant_facts>")
+        if episodes:
+            context_parts.append("<past_experiences>\n" + "\n".join(f"- {e}" for e in episodes) + "\n</past_experiences>")
+            
+        return "\n\n".join(context_parts)
+    except Exception as e:
+        log.error(f"[memory] Retrieval failed: {e}")
+        return ""
