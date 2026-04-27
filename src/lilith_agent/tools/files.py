@@ -15,6 +15,21 @@ from pypdf import PdfReader
 _WRITE_ROOT: Path = Path(".lilith/scratch").resolve()
 
 
+# Default directories pruned by find_files. Keeps results useful on real
+# codebases by skipping vendored/build/cache trees.
+_DEFAULT_EXCLUDES: tuple[str, ...] = (
+    "node_modules",
+    ".git",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    "dist",
+    "build",
+    ".tox",
+)
+
+
 def set_write_root(root: str | Path) -> None:
     """Set the sandboxed root directory for write_file. Call once at startup."""
     global _WRITE_ROOT
@@ -166,9 +181,12 @@ def find_files(name: str, root: str = ".", max_results: int = 200) -> str:
     root = os.path.expanduser(root)
     if not Path(root).exists():
         return f"ERROR: Path {root} does not exist."
+    argv = ["find", str(root), "-name", name]
+    for excl in _DEFAULT_EXCLUDES:
+        argv.extend(["-not", "-path", f"*/{excl}/*"])
     try:
         result = subprocess.run(
-            ["find", str(root), "-name", name],
+            argv,
             capture_output=True,
             text=True,
             timeout=30,
@@ -176,7 +194,13 @@ def find_files(name: str, root: str = ".", max_results: int = 200) -> str:
         lines = [ln for ln in result.stdout.splitlines() if ln]
         if not lines:
             return "No files found."
-        return "\n".join(lines[:max_results])
+        if len(lines) > max_results:
+            shown = lines[:max_results]
+            shown.append(
+                f"[truncated: showing first {max_results} of {len(lines)} matches]"
+            )
+            return "\n".join(shown)
+        return "\n".join(lines)
     except subprocess.TimeoutExpired:
         return "ERROR: find timed out (>30s)."
     except Exception as e:

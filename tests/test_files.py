@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -122,3 +121,31 @@ def test_find_files_expands_tilde(monkeypatch, tmp_path: Path):
 def test_find_files_missing_root_errors(tmp_path: Path):
     out = find_files("anything", str(tmp_path / "does_not_exist"))
     assert out.startswith("ERROR")
+
+
+def test_find_files_excludes_node_modules(tmp_path: Path):
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "skip.txt").write_text("")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "keep.txt").write_text("")
+    out = find_files("*.txt", str(tmp_path))
+    assert "keep.txt" in out
+    assert "skip.txt" not in out
+
+
+def test_find_files_excludes_dot_git(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "config").write_text("")
+    out = find_files("config", str(tmp_path))
+    assert str(tmp_path / "src" / "config") in out
+    assert str(tmp_path / ".git" / "config") not in out
+
+
+def test_find_files_truncation_sentinel(tmp_path: Path):
+    for i in range(4):
+        (tmp_path / f"file{i}.txt").write_text("")
+    out = find_files("*.txt", str(tmp_path), max_results=3)
+    assert "[truncated:" in out
+    assert "of 4" in out
