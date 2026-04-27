@@ -5,6 +5,7 @@ src/lilith_agent/__init__.py
 src/lilith_agent/app.py
 src/lilith_agent/config.py
 src/lilith_agent/gaia_dataset.py
+src/lilith_agent/memory.py
 src/lilith_agent/models.py
 src/lilith_agent/observability.py
 src/lilith_agent/runner.py

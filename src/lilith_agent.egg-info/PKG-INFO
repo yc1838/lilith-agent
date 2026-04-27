@@ -8,7 +8,7 @@ Requires-Dist: langgraph-checkpoint-sqlite
 Requires-Dist: langmem>=0.0.1
 Requires-Dist: langchain-core<2.0,>=1.0
 Requires-Dist: langchain-anthropic<2.0,>=1.0
-Requires-Dist: langchain-google-genai<5.0,>=2.0.0
+Requires-Dist: langchain-google-genai<5.0,>=4.2.2
 Requires-Dist: langchain-ollama<2.0,>=1.0
 Requires-Dist: langchain-huggingface<2.0,>=1.0
 Requires-Dist: langchain-openai<2.0,>=1.0.0

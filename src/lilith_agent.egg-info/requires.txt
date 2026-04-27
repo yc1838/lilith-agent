@@ -3,7 +3,7 @@ langgraph-checkpoint-sqlite
 langmem>=0.0.1
 langchain-core<2.0,>=1.0
 langchain-anthropic<2.0,>=1.0
-langchain-google-genai<5.0,>=2.0.0
+langchain-google-genai<5.0,>=4.2.2
 langchain-ollama<2.0,>=1.0
 langchain-huggingface<2.0,>=1.0
 langchain-openai<2.0,>=1.0.0
