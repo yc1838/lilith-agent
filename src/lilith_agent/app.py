@@ -276,7 +276,7 @@ def _route_after_model(
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
         return "tools"
-    return END
+    return "extract_memory"
 
 
 def _build_tool_node(
@@ -576,12 +576,22 @@ def build_react_agent(cfg: Config):
         response = model.invoke([SystemMessage(sys_prompt)] + compacted)
         return {"messages": [response]}
 
+    def extract_memory_node(state):
+        from lilith_agent.memory import extract_and_compress_facts
+        try:
+            cheap_model = get_cheap_model(cfg)
+            extract_and_compress_facts(state["messages"], cheap_model)
+        except Exception as e:
+            log.warning("[memory] failed to run extraction: %s", e)
+        return state
+
     tool_node = _build_tool_node(tools, semantic_dedup_threshold=cfg.semantic_dedup_threshold)
 
     graph = StateGraph(AgentState)
     graph.add_node("model", model_node)
     graph.add_node("tools", tool_node)
     graph.add_node("fail_safe", fail_safe_node)
+    graph.add_node("extract_memory", extract_memory_node)
 
     def _router(state) -> str:
         return _route_after_model(
@@ -591,9 +601,10 @@ def build_react_agent(cfg: Config):
         )
 
     graph.set_entry_point("model")
-    graph.add_conditional_edges("model", _router, {"tools": "tools", "fail_safe": "fail_safe", END: END})
+    graph.add_conditional_edges("model", _router, {"tools": "tools", "fail_safe": "fail_safe", "extract_memory": "extract_memory"})
     graph.add_edge("tools", "model")
-    graph.add_edge("fail_safe", END)
+    graph.add_edge("fail_safe", "extract_memory")
+    graph.add_edge("extract_memory", END)
 
     # Setup SQLite Saver
     lilith_home = Path(os.getenv("LILITH_HOME", ".lilith"))
