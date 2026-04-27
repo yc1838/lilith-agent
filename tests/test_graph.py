@@ -23,7 +23,7 @@ def test_router_goes_to_tools_when_tool_calls_present():
 
 def test_router_ends_when_no_tool_calls():
     state = {"messages": [AIMessage(content="done")]}
-    assert _route_after_model(state) == "__end__"
+    assert _route_after_model(state) == "extract_memory"
 
 
 def test_tool_node_invokes_tool_and_returns_tool_message():

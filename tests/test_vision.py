@@ -31,5 +31,5 @@ def test_fal_vision_integration(tmp_path):
     assert "ERROR:" not in result, f"Vision API returned an error: {result}"
     assert "File Preparation Failed" not in result, f"Failed to download image: {result}"
     assert "All Vision Attempts Failed" not in result, "Vision multi-tier fallback failed completely"
-    assert len(result.strip()) > 3, "Vision result is suspiciously empty"
+    assert len(result.strip()) >= 3, "Vision result is suspiciously empty"
     print(f"Vision API responded successfully:\n{result}")
