@@ -13,6 +13,34 @@ log = logging.getLogger(__name__)
 LILITH_HOME = Path(os.getenv("LILITH_HOME", ".lilith"))
 MEMORY_DB_PATH = LILITH_HOME / "long_term_memory.sqlite"
 
+def _content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if text is not None:
+                    parts.append(str(text))
+                elif "content" in item:
+                    nested = _content_to_text(item["content"])
+                    if nested:
+                        parts.append(nested)
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
+def _memory_content_to_text(content: Any) -> str:
+    if hasattr(content, "content"):
+        return _content_to_text(content.content)
+    return _content_to_text(content)
+
 class MemoryStore:
     def __init__(self, db_path: Path = MEMORY_DB_PATH):
         self.db_path = db_path
@@ -95,8 +123,7 @@ def extract_and_compress_facts(messages: List[BaseMessage], model) -> None:
     try:
         # 1. Get existing memories from our local store
         existing_rows = _store.get_all_memories()
-        # langmem manager expects a list of dictionaries or objects matching the schema
-        existing_memories = [{"content": m["content"]} for m in existing_rows]
+        existing_memories = [m["content"] for m in existing_rows]
 
         # 2. Initialize langmem manager (it's a Runnable)
         # We use the default schema which is basically content strings
@@ -118,13 +145,13 @@ def extract_and_compress_facts(messages: List[BaseMessage], model) -> None:
                 # result elements can be ExtractedMemory objects or simple dicts
                 content = getattr(item, "content", None) or (item[1] if isinstance(item, tuple) else item.get("content"))
                 if content:
-                    updated_facts.append({"content": str(content)})
+                    updated_facts.append({"content": _memory_content_to_text(content)})
             
             _store.save_memories(updated_facts)
             log.info(f"[memory] langmem updated store to {len(updated_facts)} facts.")
 
-    except Exception as e:
-        log.error(f"[memory] langmem extraction failed: {e}")
+    except Exception:
+        log.exception("[memory] langmem extraction failed")
         # Fallback to summarize episode if manager fails
         summarize_episode(messages, model)
 
@@ -135,15 +162,17 @@ def summarize_episode(messages: List[BaseMessage], model) -> None:
         initial_question = ""
         outcome = "success"
         for m in messages:
+            content = _content_to_text(m.content)
             if isinstance(m, HumanMessage) and not initial_question:
-                initial_question = str(m.content)
-            if "ERROR" in str(m.content).upper():
+                initial_question = content
+            if "ERROR" in content.upper():
                 outcome = "failed/struggled"
                 
         conv_parts = []
         for m in messages:
-            if m.content:
-                conv_parts.append(f"{m.type}: {str(m.content)[:200]}...")
+            content = _content_to_text(m.content)
+            if content:
+                conv_parts.append(f"{m.type}: {content[:200]}...")
         conv_str = "\n".join(conv_parts)
 
         prompt = f"""
@@ -159,10 +188,10 @@ Briefly explain:
 Keep it under 150 words.
 """
         response = model.invoke(prompt)
-        _store.add_episode(initial_question, response.content, outcome)
+        _store.add_episode(initial_question, _content_to_text(response.content), outcome)
         log.info("[memory] Episode saved.")
-    except Exception as e:
-        log.error(f"[memory] Summarization failed: {e}")
+    except Exception:
+        log.exception("[memory] Summarization failed")
 
 def retrieve_relevant_context(query: str) -> str:
     """Fetches all facts and recent episodes to inject into the prompt."""
@@ -180,6 +209,6 @@ def retrieve_relevant_context(query: str) -> str:
             context_parts.append(f"<past_experiences>\n{epi_lines}\n</past_experiences>")
             
         return "\n\n".join(context_parts)
-    except Exception as e:
-        log.error(f"[memory] Retrieval failed: {e}")
+    except Exception:
+        log.exception("[memory] Retrieval failed")
         return ""
