@@ -2,7 +2,8 @@ gradio
 requests
 httpx
 pandas
-langgraph>=0.2.0
+langgraph>=1.0,<2.0
+langgraph-checkpoint-sqlite
 langmem>=0.0.1
 langchain-core>=0.3.0
 langchain-anthropic>=0.2.0

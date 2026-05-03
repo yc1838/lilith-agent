@@ -10,3 +10,4 @@ submission.jsonl
 anatomy.pdf
 anatomy_full.pdf
 *.csv
+.pycache/*
