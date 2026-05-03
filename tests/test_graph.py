@@ -130,3 +130,27 @@ def test_tool_node_catches_tool_exceptions_and_feeds_back():
     msg = out["messages"][0]
     assert isinstance(msg, ToolMessage)
     assert "kaboom" in msg.content
+
+
+@tool_decorator
+def todo_sentinel_tool(action: str) -> str:
+    """Returns todo sentinel output."""
+    if action == "write":
+        return "SET_TODOS: ['first', 'second']"
+    return "DONE_TODO: 0"
+
+
+def test_tool_node_consumes_todo_sentinels_into_state():
+    node = _build_tool_node([todo_sentinel_tool])
+
+    write_out = node({
+        "messages": [_ai_with_calls([{"id": "1", "name": "todo_sentinel_tool", "args": {"action": "write"}}])],
+        "todos": [],
+    })
+    assert write_out["todos"] == ["first", "second"]
+
+    done_out = node({
+        "messages": [_ai_with_calls([{"id": "2", "name": "todo_sentinel_tool", "args": {"action": "done"}}])],
+        "todos": write_out["todos"],
+    })
+    assert done_out["todos"] == ["second"]

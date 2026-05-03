@@ -18,6 +18,7 @@ hf_oauth_expiration_minutes: 480
 ## Features
 
 - **Explicit ReAct graph** — tool-call dedup, per-tool error feedback, recursion cap, iteration fail-safe
+- **Three-layer persistent memory** — short-term thread checkpoints, long-term semantic facts (LangMem), episodic task experiences; inspired by the Engram memory architecture
 - **Tool belt** — web search, URL fetch, sandboxed Python, file I/O, PDF, audio/video transcription, YouTube frame extraction, vision (Gemini + FAL fallbacks), arXiv, CrossRef, todos
 - **Multi-provider routing** — cheap / strong / extra-strong model tiers with independent provider+model config
 - **Observability** — per-session JSONL trace + rotating log file, optional Arize AX + LangSmith tracing
@@ -88,6 +89,9 @@ The TUI prints the logo, caveman status, and the trace file path. Type your ques
 | Command | Effect |
 | --- | --- |
 | `/clear` | Wipe conversation memory, start a new thread |
+| `/memory list` | Show all stored facts and recent episodic experiences |
+| `/memory forget <id>` | Delete a fact by ID prefix |
+| `/memory reflect` | Manually trigger long-term memory extraction for the current thread |
 | `/caveman` | Toggle caveman on/off |
 | `/caveman off` / `/caveman on` | Explicit on/off |
 | `/caveman lite` | Lightest — keep articles & full sentences, cut fluff |
@@ -136,7 +140,8 @@ All tools live under [src/lilith_agent/tools/](src/lilith_agent/tools/) and are 
 | `inspect_pdf` | PDF → text |
 | `inspect_visual_content` | Multimodal vision (Gemini + FAL moondream/llava fallbacks) |
 | `arxiv_search`, `crossref_search`, `count_journal_articles`, `filter_entities` | Academic metadata |
-| `write_todos`, `mark_todo_done` | High-level planning |
+| `todos` | High-level planning |
+| `search_memory` | Query Lilith's long-term memory (facts + episodes) by keyword |
 
 ### Vision fallback chain
 
@@ -156,6 +161,7 @@ src/lilith_agent/
   app.py             # ReAct graph, model routing, caveman prompt wrapping
   tui.py             # interactive loop, slash commands, rich output
   runner.py          # batch runner over GAIA questions
+  memory.py          # three-layer memory: checkpoints, semantic facts, episodic
   config.py          # Config.from_env(), model + API key + feature flags
   observability.py   # logging, Arize setup, JsonlTraceCallback
   models.py          # provider -> chat model builder
@@ -164,11 +170,37 @@ src/lilith_agent/
 scripts/
   dev_run_gaia.py    # CLI to run against real GAIA questions
 .checkpoints/        # per-question answers (gitignored)
-.lilith/             # session logs + JSONL traces (gitignored)
+.lilith/             # session logs, JSONL traces, long_term_memory.sqlite (gitignored)
 ```
+
+## Memory system
+
+Lilith uses a three-layer persistent memory architecture loosely inspired by the [Engram memory model](https://arxiv.org/abs/2501.12599):
+
+| Layer | Storage | Role |
+| --- | --- | --- |
+| **Short-term** (thread checkpoints) | `.lilith/threads.sqlite` via LangGraph `SqliteSaver` | Preserves full conversation state across restarts within a thread |
+| **Long-term semantic** (facts) | `.lilith/long_term_memory.sqlite` | Extracts and deduplicates user preferences, names, project details using LangMem; injected into the system prompt on new queries |
+| **Episodic** (task experiences) | `.lilith/long_term_memory.sqlite` | Summarises past tool trajectories — what failed, what worked — so Lilith avoids repeating mistakes |
+
+The semantic layer uses LangMem as a memory governance engine (extraction, conflict resolution, forgetting) while SQLite provides local, auditable, migratable persistence. Long-term memory extraction runs automatically after each conversation and can be triggered manually with `/memory reflect`. The agent can also call `search_memory` during reasoning when the system-prompt injection has been truncated.
+
+For batch GAIA runs each question gets an isolated ephemeral memory store (`MemoryStore(":memory:")`) so questions cannot contaminate each other.
 
 ## Testing
 
 ```bash
 pytest
+```
+
+Memory tests can use the `ephemeral_memory()` context manager for isolated in-memory stores:
+
+```python
+from lilith_agent.memory import ephemeral_memory
+
+def test_something():
+    with ephemeral_memory() as store:
+        store.add_episode("task", "summary", "success")
+        assert len(store.get_recent_episodes()) == 1
+    # store discarded on exit, no disk writes
 ```

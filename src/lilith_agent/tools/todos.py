@@ -1,29 +1,19 @@
 from __future__ import annotations
-from typing import List
+from typing import List, Optional
 
-def write_todos(todos: List[str]) -> str:
-    """
-    Initialize or overwrite the current task list (Todo list).
-    Used for high-level planning and tracking progress.
-    """
-    # This tool will be handled specially by the executor node to update AgentState
-    return f"SET_TODOS: {todos}"
 
-def mark_todo_done(index: int) -> str:
-    """
-    Mark a specific todo as complete by its 0-indexed position.
-    """
-    # This tool will be handled specially by the executor node to update AgentState
-    return f"DONE_TODO: {index}"
-
-def read_todos(todo_list: List[str]) -> str:
-    """
-    Read the current state of the todo list.
-    """
-    if not todo_list:
-        return "Todo list is empty."
-    
-    lines = []
-    for i, todo in enumerate(todo_list):
-        lines.append(f"{i}. {todo}")
-    return "\n".join(lines)
+def todos(
+    action: str,
+    items: Optional[List[str]] = None,
+    index: Optional[int] = None,
+) -> str:
+    """Branching todo tool. Executor node consumes SET_TODOS / DONE_TODO sentinels."""
+    if action == "write":
+        if items is None:
+            return "ERROR: action='write' requires `items` (list of strings)."
+        return f"SET_TODOS: {items}"
+    if action == "done":
+        if index is None:
+            return "ERROR: action='done' requires `index` (0-based position)."
+        return f"DONE_TODO: {index}"
+    return f"ERROR: unknown action '{action}'. Use 'write' or 'done'."

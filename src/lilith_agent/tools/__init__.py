@@ -14,11 +14,7 @@ from lilith_agent.tools.files import (
     find_files as _find_files,
     write_file as _write_file
 )
-from lilith_agent.tools.todos import (
-    write_todos as _write_todos,
-    mark_todo_done as _mark_todo_done,
-    read_todos as _read_todos
-)
+from lilith_agent.tools.todos import todos as _todos
 from lilith_agent.tools.pdf import inspect_pdf as _inspect_pdf
 from lilith_agent.tools.python_exec import run_python as _run_python
 from lilith_agent.tools.search import web_search as _web_search
@@ -117,14 +113,13 @@ def build_tools(cfg: Config) -> list[BaseTool]:
         return _write_file(path, content)
 
     @tool
-    def write_todos(todos: list[str]) -> str:
-        """Initialize or overwrite the current task list (Todo list). Use for high-level planning."""
-        return _write_todos(todos)
+    def todos(action: str, items: Optional[list[str]] = None, index: Optional[int] = None) -> str:
+        """Manage the planning todo list.
 
-    @tool
-    def mark_todo_done(index: int) -> str:
-        """Mark a specific todo as complete by its position."""
-        return _mark_todo_done(index)
+        action='write': overwrite the list. Requires `items` (list of strings).
+        action='done':  mark a todo complete. Requires `index` (0-based position).
+        """
+        return _todos(action, items=items, index=index)
 
     @tool
     def transcribe_audio(path: str) -> str:
@@ -184,6 +179,15 @@ def build_tools(cfg: Config) -> list[BaseTool]:
         """
         return _filter_entities(entities, keep_conditions=keep_conditions, remove_conditions=remove_conditions)
 
+    @tool
+    def search_memory(query: str) -> str:
+        """Search Lilith's long-term memory (semantic facts and episodic experiences) for information
+        matching the given query. Use this when the system context mentions omitted facts, or when
+        you need to recall specific past experiences, user preferences, or project details that may
+        not be in the current context window."""
+        from lilith_agent.memory import search_memory_store
+        return search_memory_store(query)
+
     return [
         web_search,
         fetch_url,
@@ -203,6 +207,6 @@ def build_tools(cfg: Config) -> list[BaseTool]:
         glob_files,
         find_files,
         write_file,
-        write_todos,
-        mark_todo_done,
+        todos,
+        search_memory,
     ]

@@ -65,7 +65,7 @@ def test_summarize_episode_logs_traceback_on_failure(tmp_path, monkeypatch, capl
     assert record.exc_info is not None
 
 
-def test_extract_and_compress_facts_passes_existing_memories_as_strings(tmp_path, monkeypatch):
+def test_extract_and_compress_facts_passes_existing_memories_with_ids(tmp_path, monkeypatch):
     from lilith_agent import memory
     import langmem
 
@@ -81,6 +81,15 @@ def test_extract_and_compress_facts_passes_existing_memories_as_strings(tmp_path
     monkeypatch.setattr(memory, "_store", store)
     monkeypatch.setattr(langmem, "create_memory_manager", lambda model, enable_deletes: FakeManager())
 
-    memory.extract_and_compress_facts([HumanMessage(content="New fact")], object())
+    class FakeModel:
+        def invoke(self, prompt):
+            class Response:
+                content = "Lesson"
 
-    assert captured["existing"] == ["Existing fact"]
+            return Response()
+
+    memory.extract_and_compress_facts([HumanMessage(content="New fact")], FakeModel())
+
+    existing_id, existing_memory = captured["existing"][0]
+    assert existing_id == "memory-1"
+    assert existing_memory.content == "Existing fact"

@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import string
+import ast
 from typing import Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -19,6 +20,7 @@ from typing import Annotated, TypedDict
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     iterations: int
+    todos: list[str]
 
 
 from lilith_agent.config import Config
@@ -292,6 +294,7 @@ def _build_tool_node(
         messages = state["messages"]
         last = messages[-1]
         tool_calls = getattr(last, "tool_calls", None) or []
+        todo_state_update = None
         if tool_calls:
             log_tools.info(
                 "[tools] dispatching %d call(s): %s",
@@ -410,13 +413,31 @@ def _build_tool_node(
                 continue
 
             out_str = str(out)
+            if out_str.startswith("SET_TODOS:"):
+                try:
+                    parsed = ast.literal_eval(out_str[len("SET_TODOS:"):].strip())
+                    if isinstance(parsed, list):
+                        todo_state_update = [str(item) for item in parsed]
+                except Exception:
+                    pass
+            elif out_str.startswith("DONE_TODO:"):
+                try:
+                    idx = int(out_str[len("DONE_TODO:"):].strip())
+                    current = list(state.get("todos", []))
+                    if 0 <= idx < len(current):
+                        todo_state_update = current[:idx] + current[idx + 1:]
+                except Exception:
+                    pass
             preview = out_str.replace("\n", " ")
             if len(preview) > _TOOL_RESULT_PREVIEW_CHARS:
                 preview = preview[:_TOOL_RESULT_PREVIEW_CHARS] + "…"
             log_tools.info("[tools] tool result (%d chars): %s", len(out_str), preview)
             results.append(ToolMessage(tool_call_id=tc_id, name=name, content=out_str))
 
-        return {"messages": results}
+        update = {"messages": results}
+        if todo_state_update is not None:
+            update["todos"] = todo_state_update
+        return update
 
     return tool_node
 
@@ -592,10 +613,14 @@ def build_react_agent(cfg: Config):
         return {"messages": [response]}
 
     def extract_memory_node(state):
-        from lilith_agent.memory import extract_and_compress_facts
+        from lilith_agent.memory import extract_and_compress_facts, MIN_MESSAGES_FOR_EXTRACTION
+        messages = state["messages"]
+        if len(messages) < MIN_MESSAGES_FOR_EXTRACTION:
+            log.debug("[memory] skipping extraction: only %d messages", len(messages))
+            return state
         try:
             cheap_model = get_cheap_model(cfg)
-            extract_and_compress_facts(state["messages"], cheap_model)
+            extract_and_compress_facts(messages, cheap_model)
         except Exception as e:
             log.warning("[memory] failed to run extraction: %s", e)
         return state

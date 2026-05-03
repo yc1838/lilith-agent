@@ -205,8 +205,10 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
             "iterations": 0
         }
 
+        from lilith_agent.memory import ephemeral_memory
         try:
-            result = graph.invoke(state, {"configurable": {"thread_id": task_id}})
+            with ephemeral_memory():
+                result = graph.invoke(state, {"configurable": {"thread_id": task_id}})
         except Exception as exc:
             log_runner.warning("[runner] task=%s agent error: %s", task_id, exc)
             answers.append(
