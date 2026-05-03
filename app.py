@@ -16,38 +16,7 @@ import requests
 from lilith_agent.app import build_react_agent
 from lilith_agent.config import Config
 from lilith_agent.runner import run_agent_on_questions
-
-
-DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
-
-
-class ScoringApiClient:
-    """Tiny client for the GAIA scoring Space (questions + file download)."""
-
-    def __init__(self, api_url: str = DEFAULT_API_URL) -> None:
-        self.api_url = api_url.rstrip("/")
-
-    def get_questions(self) -> list[dict]:
-        r = requests.get(f"{self.api_url}/questions", timeout=30)
-        r.raise_for_status()
-        return r.json()
-
-    def download_file(self, task_id: str, dest_dir: str | Path) -> Path | None:
-        dest_dir = Path(dest_dir)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            r = requests.get(f"{self.api_url}/files/{task_id}", timeout=60)
-            r.raise_for_status()
-        except requests.RequestException:
-            return None
-
-        filename = task_id
-        cd = r.headers.get("content-disposition", "")
-        if "filename=" in cd:
-            filename = cd.split("filename=")[-1].strip().strip('"')
-        out = dest_dir / filename
-        out.write_bytes(r.content)
-        return out
+from lilith_agent.scoring_client import DEFAULT_API_URL, ScoringApiClient
 
 
 class LilithAgent:
@@ -86,6 +55,8 @@ def run_and_submit_all(profile: gr.OAuthProfile | None):
         questions_data = agent.client.get_questions()
     except requests.exceptions.RequestException as e:
         return f"Error fetching questions: {e}", None
+    if agent.client.last_warning:
+        print(agent.client.last_warning)
 
     if not questions_data:
         return "Fetched questions list is empty or invalid format.", None
