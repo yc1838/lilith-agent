@@ -195,3 +195,59 @@ def test_success_resets_lane_failure_counter(monkeypatch):
         failing._generate([])
 
     assert raised.value.cooldown_seconds == 60
+
+
+def test_same_gemini_lane_shares_cooldown(monkeypatch):
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_client_error(429)
+    now = [1000.0]
+    sleeps = []
+    monkeypatch.setattr("lilith_agent.models.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("lilith_agent.models.time.sleep", sleeps.append)
+    first = _RetryWrapper.model_construct(
+        inner=_FailingGenerateModel(exc), provider="google", model_name="gemini-3.1-pro"
+    )
+    second = _RetryWrapper.model_construct(
+        inner=_SuccessfulGenerateModel(), provider="google", model_name="gemini-3.1-pro"
+    )
+
+    with pytest.raises(RateLimitCooldownError):
+        first._generate([])
+    now[0] = 1005.0
+    second._generate([])
+
+    assert sleeps == [55.0]
+
+
+def test_other_gemini_lane_does_not_sleep_for_pro_cooldown(monkeypatch):
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_client_error(429)
+    now = [1000.0]
+    sleeps = []
+    monkeypatch.setattr("lilith_agent.models.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("lilith_agent.models.time.sleep", sleeps.append)
+    pro = _RetryWrapper.model_construct(
+        inner=_FailingGenerateModel(exc), provider="google", model_name="gemini-3.1-pro"
+    )
+    flash = _RetryWrapper.model_construct(
+        inner=_SuccessfulGenerateModel(), provider="google", model_name="gemini-3-flash-preview"
+    )
+
+    with pytest.raises(RateLimitCooldownError):
+        pro._generate([])
+    now[0] = 1005.0
+    flash._generate([])
+
+    assert sleeps == []
+
+
+def test_unknown_google_model_does_not_get_gemini_cooldown(monkeypatch):
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_client_error(429)
+    monkeypatch.setattr("lilith_agent.models.time.sleep", lambda _: None)
+    wrapper = _RetryWrapper.model_construct(
+        inner=_FailingGenerateModel(exc), provider="google", model_name="gemini-unknown"
+    )
+
+    with pytest.raises(type(exc)):
+        wrapper._generate([])
