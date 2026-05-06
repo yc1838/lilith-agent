@@ -374,3 +374,19 @@ def test_batch_window_does_not_trigger_below_threshold():
         record_rate_limit_success()
 
     assert batch_rate_limit_pause_seconds() is None
+
+
+def test_bound_retry_wrapper_raises_cooldown_for_gemini_lane(monkeypatch):
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_client_error(429)
+    monkeypatch.setattr("lilith_agent.models.time.sleep", lambda _: None)
+    wrapper = _RetryWrapper.model_construct(
+        inner=_FailingGenerateModel(exc), provider="google", model_name="gemini-3.1-pro"
+    )
+
+    bound = wrapper.bind_tools([])
+
+    with pytest.raises(RateLimitCooldownError) as raised:
+        bound.invoke([("user", "hi")])
+
+    assert raised.value.model == "gemini-3.1-pro"

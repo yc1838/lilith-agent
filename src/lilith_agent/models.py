@@ -376,26 +376,38 @@ class _RetryWrapper(BaseChatModel):
 
     def bind_tools(self, tools: Any, **kwargs: Any):
         bound = self.inner.bind_tools(tools, **kwargs)
-        # We need to wrap the resulting bound tool caller's invoke method too
-        return _BoundRetryWrapper(bound=bound)
+        return _BoundRetryWrapper(bound=bound, provider=self.provider, model_name=self.model_name)
 
 
 class _BoundRetryWrapper(Runnable):
     """Wraps a tool-bound Runnable to apply retry logic to .invoke()."""
 
-    def __init__(self, bound):
+    def __init__(self, bound, provider: str | None = None, model_name: str | None = None):
         self._bound = bound
+        self._provider = provider
+        self._model_name = model_name
 
     def invoke(self, input, config=None, **kwargs):
-        for attempt in Retrying(**_sync_retry_params()):
-            with attempt:
-                try:
-                    result = self._bound.invoke(input, config=config, **kwargs)
-                except Exception as observed:
-                    record_rate_limit_observation(observed)
-                    raise
-                record_rate_limit_success()
-                return result
+        lane = _gemini_lane(self._provider, self._model_name)
+        _sleep_active_cooldown(lane)
+        try:
+            for attempt in Retrying(**_sync_retry_params()):
+                with attempt:
+                    try:
+                        result = self._bound.invoke(input, config=config, **kwargs)
+                    except Exception as observed:
+                        record_rate_limit_observation(observed)
+                        raise
+                    record_rate_limit_success()
+                    _record_success(lane)
+                    return result
+        except Exception as exc:
+            if lane is not None and is_retryable_rate_limit(exc):
+                reason = _batch_abort_reason(exc)
+                if reason is not None:
+                    raise BatchAbortRateLimitError(reason=reason, original_error=str(exc)) from exc
+                raise _record_exhausted_rate_limit(lane, exc) from exc
+            raise
 
     async def ainvoke(self, input, config=None, **kwargs):
         async for attempt in AsyncRetrying(**_async_retry_params()):
