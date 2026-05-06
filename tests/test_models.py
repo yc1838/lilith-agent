@@ -10,9 +10,11 @@ from lilith_agent.models import (
     _BoundRetryWrapper,
     _BoundNoThinkWrapper,
     BatchAbortRateLimitError,
+    QuestionRateLimitStreakError,
     RateLimitCooldownError,
     _reset_rate_limit_state_for_tests,
     is_retryable_rate_limit,
+    rate_limit_question_scope,
 )
 
 
@@ -311,3 +313,34 @@ def test_long_retry_delay_raises_batch_abort(monkeypatch):
         wrapper._generate([])
 
     assert "retry" in raised.value.reason.lower()
+
+
+def test_question_rate_limit_scope_raises_after_50_events():
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_client_error(429)
+
+    with pytest.raises(QuestionRateLimitStreakError) as raised:
+        with rate_limit_question_scope():
+            for _ in range(50):
+                try:
+                    raise exc
+                except BaseException as caught:
+                    from lilith_agent.models import record_rate_limit_observation
+
+                    record_rate_limit_observation(caught)
+
+    assert raised.value.count == 50
+
+
+def test_question_rate_limit_scope_resets_after_success():
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_client_error(429)
+
+    with rate_limit_question_scope():
+        from lilith_agent.models import record_rate_limit_observation, record_rate_limit_success
+
+        for _ in range(49):
+            record_rate_limit_observation(exc)
+        record_rate_limit_success()
+        for _ in range(49):
+            record_rate_limit_observation(exc)

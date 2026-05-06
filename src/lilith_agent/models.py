@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -109,8 +111,10 @@ LMSTUDIO_DEFAULT_BASE_URL = "http://localhost:1234/v1"
 _NO_THINK = "/no_think"
 _GEMINI_COOLDOWN_MODELS = {"gemini-3-flash-preview", "gemini-3.1-pro"}
 _COOLDOWN_LADDER_SECONDS = (60, 120, 300)
+_QUESTION_STREAK_LIMIT = 50
 _cooldown_until: dict[tuple[str, str], float] = {}
 _rate_limit_exhaustions: dict[tuple[str, str], int] = {}
+_question_rate_limit_streak: ContextVar[int | None] = ContextVar("question_rate_limit_streak", default=None)
 
 
 @dataclass
@@ -136,9 +140,41 @@ class BatchAbortRateLimitError(Exception):
         return f"batch abort rate limit: {self.reason}; original={self.original_error}"
 
 
+@dataclass
+class QuestionRateLimitStreakError(Exception):
+    count: int
+
+    def __str__(self) -> str:
+        return f"question hit {self.count} consecutive rate-limit events"
+
+
 def _reset_rate_limit_state_for_tests() -> None:
     _cooldown_until.clear()
     _rate_limit_exhaustions.clear()
+
+
+@contextmanager
+def rate_limit_question_scope():
+    token = _question_rate_limit_streak.set(0)
+    try:
+        yield
+    finally:
+        _question_rate_limit_streak.reset(token)
+
+
+def record_rate_limit_observation(exc: BaseException) -> None:
+    current = _question_rate_limit_streak.get()
+    if current is None or not is_retryable_rate_limit(exc):
+        return
+    current += 1
+    _question_rate_limit_streak.set(current)
+    if current >= _QUESTION_STREAK_LIMIT:
+        raise QuestionRateLimitStreakError(count=current) from exc
+
+
+def record_rate_limit_success() -> None:
+    if _question_rate_limit_streak.get() is not None:
+        _question_rate_limit_streak.set(0)
 
 
 def _gemini_lane(provider: str | None, model_name: str | None) -> tuple[str, str] | None:
@@ -289,7 +325,12 @@ class _RetryWrapper(BaseChatModel):
         try:
             for attempt in Retrying(**_sync_retry_params()):
                 with attempt:
-                    result = self.inner._generate(*args, **kwargs)
+                    try:
+                        result = self.inner._generate(*args, **kwargs)
+                    except Exception as observed:
+                        record_rate_limit_observation(observed)
+                        raise
+                    record_rate_limit_success()
                     _record_success(lane)
                     return result
         except Exception as exc:
@@ -320,7 +361,13 @@ class _BoundRetryWrapper(Runnable):
     def invoke(self, input, config=None, **kwargs):
         for attempt in Retrying(**_sync_retry_params()):
             with attempt:
-                return self._bound.invoke(input, config=config, **kwargs)
+                try:
+                    result = self._bound.invoke(input, config=config, **kwargs)
+                except Exception as observed:
+                    record_rate_limit_observation(observed)
+                    raise
+                record_rate_limit_success()
+                return result
 
     async def ainvoke(self, input, config=None, **kwargs):
         async for attempt in AsyncRetrying(**_async_retry_params()):
