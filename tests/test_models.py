@@ -13,6 +13,8 @@ from lilith_agent.models import (
     QuestionRateLimitStreakError,
     RateLimitCooldownError,
     _reset_rate_limit_state_for_tests,
+    batch_rate_limit_pause_seconds,
+    clear_batch_rate_limit_window,
     is_retryable_rate_limit,
     rate_limit_question_scope,
 )
@@ -344,3 +346,31 @@ def test_question_rate_limit_scope_resets_after_success():
         record_rate_limit_success()
         for _ in range(49):
             record_rate_limit_observation(exc)
+
+
+def test_batch_window_triggers_pause_after_70_rate_limits_in_100_outcomes():
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_client_error(429)
+    from lilith_agent.models import record_rate_limit_observation, record_rate_limit_success
+
+    for _ in range(70):
+        record_rate_limit_observation(exc)
+    for _ in range(30):
+        record_rate_limit_success()
+
+    assert batch_rate_limit_pause_seconds() == 300
+    clear_batch_rate_limit_window()
+    assert batch_rate_limit_pause_seconds() is None
+
+
+def test_batch_window_does_not_trigger_below_threshold():
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_client_error(429)
+    from lilith_agent.models import record_rate_limit_observation, record_rate_limit_success
+
+    for _ in range(69):
+        record_rate_limit_observation(exc)
+    for _ in range(31):
+        record_rate_limit_success()
+
+    assert batch_rate_limit_pause_seconds() is None

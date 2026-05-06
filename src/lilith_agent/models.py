@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -112,9 +113,14 @@ _NO_THINK = "/no_think"
 _GEMINI_COOLDOWN_MODELS = {"gemini-3-flash-preview", "gemini-3.1-pro"}
 _COOLDOWN_LADDER_SECONDS = (60, 120, 300)
 _QUESTION_STREAK_LIMIT = 50
+_BATCH_WINDOW_SIZE = 100
+_BATCH_WINDOW_RATE_LIMIT_THRESHOLD = 70
+_BATCH_PAUSE_LADDER_SECONDS = (300, 600, 1200)
 _cooldown_until: dict[tuple[str, str], float] = {}
 _rate_limit_exhaustions: dict[tuple[str, str], int] = {}
 _question_rate_limit_streak: ContextVar[int | None] = ContextVar("question_rate_limit_streak", default=None)
+_batch_rate_limit_window: deque[bool] = deque(maxlen=_BATCH_WINDOW_SIZE)
+_batch_pause_count = 0
 
 
 @dataclass
@@ -149,8 +155,11 @@ class QuestionRateLimitStreakError(Exception):
 
 
 def _reset_rate_limit_state_for_tests() -> None:
+    global _batch_pause_count
     _cooldown_until.clear()
     _rate_limit_exhaustions.clear()
+    _batch_rate_limit_window.clear()
+    _batch_pause_count = 0
 
 
 @contextmanager
@@ -163,8 +172,11 @@ def rate_limit_question_scope():
 
 
 def record_rate_limit_observation(exc: BaseException) -> None:
+    if not is_retryable_rate_limit(exc):
+        return
+    _batch_rate_limit_window.append(True)
     current = _question_rate_limit_streak.get()
-    if current is None or not is_retryable_rate_limit(exc):
+    if current is None:
         return
     current += 1
     _question_rate_limit_streak.set(current)
@@ -173,8 +185,24 @@ def record_rate_limit_observation(exc: BaseException) -> None:
 
 
 def record_rate_limit_success() -> None:
+    _batch_rate_limit_window.append(False)
     if _question_rate_limit_streak.get() is not None:
         _question_rate_limit_streak.set(0)
+
+
+def batch_rate_limit_pause_seconds() -> int | None:
+    global _batch_pause_count
+    if len(_batch_rate_limit_window) < _BATCH_WINDOW_SIZE:
+        return None
+    if sum(_batch_rate_limit_window) < _BATCH_WINDOW_RATE_LIMIT_THRESHOLD:
+        return None
+    _batch_pause_count += 1
+    idx = min(_batch_pause_count - 1, len(_BATCH_PAUSE_LADDER_SECONDS) - 1)
+    return _BATCH_PAUSE_LADDER_SECONDS[idx]
+
+
+def clear_batch_rate_limit_window() -> None:
+    _batch_rate_limit_window.clear()
 
 
 def _gemini_lane(provider: str | None, model_name: str | None) -> tuple[str, str] | None:
