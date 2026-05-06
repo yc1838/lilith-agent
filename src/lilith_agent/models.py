@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from typing import Any, Sequence
 
 from langchain_anthropic import ChatAnthropic
@@ -11,43 +14,69 @@ from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
-import logging
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, Retrying, AsyncRetrying
+from tenacity import AsyncRetrying, Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 from lilith_agent.config import Config
 
-# Identify retryable exceptions (429s) across providers
-RETRY_EXCEPTIONS = []
 try:
     from google.api_core.exceptions import ResourceExhausted
-    RETRY_EXCEPTIONS.append(ResourceExhausted)
 except ImportError:
-    pass
+    ResourceExhausted = None
+
+try:
+    from google.genai.errors import ClientError as GenAIClientError
+except ImportError:
+    GenAIClientError = None
 
 try:
     from anthropic import RateLimitError as AnthropicRateLimitError
-    RETRY_EXCEPTIONS.append(AnthropicRateLimitError)
 except ImportError:
-    pass
+    AnthropicRateLimitError = None
 
 try:
     from openai import RateLimitError as OpenAIRateLimitError
-    RETRY_EXCEPTIONS.append(OpenAIRateLimitError)
 except ImportError:
-    pass
+    OpenAIRateLimitError = None
 
-RETRY_EXCEPTIONS = tuple(RETRY_EXCEPTIONS)
 
-# Shared retry configuration for context managers
-_RETRY_PARAMS = dict(
-    retry=retry_if_exception_type(RETRY_EXCEPTIONS) if RETRY_EXCEPTIONS else lambda e: False,
-    wait=wait_exponential(multiplier=2, min=4, max=60),
-    stop=stop_after_attempt(5),
-    before_sleep=lambda retry_state: log.warning(
-        f"LLM Rate Limit (429) hit. Retrying in {retry_state.next_action.sleep}s... "
-        f"(Attempt {retry_state.attempt_number}/5)"
-    ),
-    reraise=True
-)
+def is_retryable_rate_limit(exc: BaseException) -> bool:
+    if ResourceExhausted is not None and isinstance(exc, ResourceExhausted):
+        return True
+    if GenAIClientError is not None and isinstance(exc, GenAIClientError):
+        return getattr(exc, "code", None) == 429
+    if AnthropicRateLimitError is not None and isinstance(exc, AnthropicRateLimitError):
+        return True
+    if OpenAIRateLimitError is not None and isinstance(exc, OpenAIRateLimitError):
+        return True
+    return False
+
+
+def _tenacity_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+async def _async_tenacity_sleep(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+def _base_retry_params() -> dict[str, Any]:
+    return dict(
+        retry=retry_if_exception(is_retryable_rate_limit),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        stop=stop_after_attempt(5),
+        before_sleep=lambda retry_state: log.warning(
+            f"LLM Rate Limit (429) hit. Retrying in {retry_state.next_action.sleep}s... "
+            f"(Attempt {retry_state.attempt_number}/5)"
+        ),
+        reraise=True,
+    )
+
+
+def _sync_retry_params() -> dict[str, Any]:
+    return {**_base_retry_params(), "sleep": _tenacity_sleep}
+
+
+def _async_retry_params() -> dict[str, Any]:
+    return {**_base_retry_params(), "sleep": _async_tenacity_sleep}
 
 try:
     from langchain_community.cache import SQLiteCache
@@ -147,12 +176,12 @@ class _RetryWrapper(BaseChatModel):
         return f"retry-{self.inner._llm_type}"
 
     def _generate(self, *args, **kwargs):
-        for attempt in Retrying(**_RETRY_PARAMS):
+        for attempt in Retrying(**_sync_retry_params()):
             with attempt:
                 return self.inner._generate(*args, **kwargs)
 
     async def _agenerate(self, *args, **kwargs):
-        async for attempt in AsyncRetrying(**_RETRY_PARAMS):
+        async for attempt in AsyncRetrying(**_async_retry_params()):
             with attempt:
                 return await self.inner._agenerate(*args, **kwargs)
 
@@ -169,12 +198,12 @@ class _BoundRetryWrapper(Runnable):
         self._bound = bound
 
     def invoke(self, input, config=None, **kwargs):
-        for attempt in Retrying(**_RETRY_PARAMS):
+        for attempt in Retrying(**_sync_retry_params()):
             with attempt:
                 return self._bound.invoke(input, config=config, **kwargs)
 
     async def ainvoke(self, input, config=None, **kwargs):
-        async for attempt in AsyncRetrying(**_RETRY_PARAMS):
+        async for attempt in AsyncRetrying(**_async_retry_params()):
             with attempt:
                 return await self._bound.ainvoke(input, config=config, **kwargs)
 

@@ -1,3 +1,5 @@
+import pytest
+
 from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_core.messages import AIMessage
 
@@ -6,6 +8,7 @@ from lilith_agent.models import (
     _NoThinkWrapper,
     _BoundRetryWrapper,
     _BoundNoThinkWrapper,
+    is_retryable_rate_limit,
 )
 
 
@@ -53,3 +56,31 @@ def test_no_think_wrapper_bind_tools_returns_runnable():
 
     assert isinstance(bound, _BoundNoThinkWrapper)
     assert isinstance(bound, Runnable)
+
+
+def _make_genai_client_error(code: int):
+    pytest.importorskip("google.genai.errors")
+    from google.genai.errors import ClientError
+
+    return ClientError(
+        code,
+        {
+            "error": {
+                "code": code,
+                "status": "RESOURCE_EXHAUSTED" if code == 429 else "INVALID_ARGUMENT",
+                "message": "test error",
+            }
+        },
+    )
+
+
+def test_genai_client_error_429_is_retryable():
+    exc = _make_genai_client_error(429)
+
+    assert is_retryable_rate_limit(exc) is True
+
+
+def test_genai_client_error_400_is_not_retryable():
+    exc = _make_genai_client_error(400)
+
+    assert is_retryable_rate_limit(exc) is False
