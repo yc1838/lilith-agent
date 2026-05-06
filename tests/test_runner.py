@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from lilith_agent.runner import _wrap_user_question, _write_checkpoint_atomic
+from langchain_core.messages import AIMessage
+
+from lilith_agent.config import Config
+from lilith_agent.models import RateLimitCooldownError
+from lilith_agent.runner import run_agent_on_questions, _wrap_user_question, _write_checkpoint_atomic
 
 
 def test_wrap_escapes_closing_tag_to_prevent_injection():
@@ -57,3 +61,71 @@ def test_atomic_write_does_not_corrupt_existing_file_on_serialization_failure(tm
     data = json.loads(dest.read_text())
     assert data["submitted_answer"] == "good"
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.fixture
+def runner_test_config() -> Config:
+    return Config(
+        cheap_provider="google",
+        cheap_model="gemini-3-flash-preview",
+        strong_provider="google",
+        strong_model="gemini-3.1-pro",
+        extra_strong_provider="google",
+        extra_strong_model="gemini-3.1-pro",
+        vision_provider="fal",
+        vision_model="gemini-3-flash-preview",
+        fal_vision_api_key="",
+        api_url="",
+        checkpoint_dir="",
+        whisper_model="base",
+        anthropic_api_key="",
+        google_api_key="",
+        huggingface_api_key="",
+        tavily_api_key="",
+        lmstudio_base_url="",
+        max_tokens=1024,
+        llm_formatter_enabled=True,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runner_model_setup(monkeypatch, runner_test_config):
+    monkeypatch.setattr(Config, "from_env", classmethod(lambda cls: runner_test_config))
+    monkeypatch.setattr("lilith_agent.models.get_cheap_model", lambda cfg: object())
+
+
+class _GraphFailsOnceWithCooldown:
+    def __init__(self):
+        self.calls = 0
+        self.thread_ids = []
+
+    def invoke(self, state, config):
+        self.calls += 1
+        self.thread_ids.append(config["configurable"]["thread_id"])
+        if self.calls == 1:
+            raise RateLimitCooldownError(
+                provider="google",
+                model="gemini-3.1-pro",
+                cooldown_seconds=12,
+                original_error="429",
+            )
+        return {"messages": [AIMessage(content="Final Answer: 42")]}
+
+
+def test_runner_retries_same_question_once_after_cooldown(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("lilith_agent.runner._final_formatting_cleanup", lambda model, question, raw, llm_formatter_enabled=True: raw)
+    sleeps = []
+    monkeypatch.setattr("lilith_agent.runner.time.sleep", sleeps.append)
+    graph = _GraphFailsOnceWithCooldown()
+
+    answers = run_agent_on_questions(
+        graph,
+        [{"task_id": "task-1", "question": "What is 6*7?"}],
+        tmp_path,
+    )
+
+    assert graph.calls == 2
+    assert graph.thread_ids == ["task-1", "task-1"]
+    assert sleeps == [12]
+    assert answers == [{"task_id": "task-1", "submitted_answer": "Final Answer: 42"}]
+    assert (tmp_path / "task-1.json").exists()

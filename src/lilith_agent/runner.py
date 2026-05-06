@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -159,11 +160,19 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
     answers: list[dict] = []
 
     from lilith_agent.config import Config
-    from lilith_agent.models import get_cheap_model
+    from lilith_agent.models import RateLimitCooldownError, get_cheap_model, rate_limit_question_scope
     cfg = Config.from_env()
     cheap_model = get_cheap_model(cfg)
 
     total = len(questions)
+
+    def _invoke_task_once(task_state: dict, task_id: str):
+        from lilith_agent.memory import ephemeral_memory
+
+        with rate_limit_question_scope():
+            with ephemeral_memory():
+                return graph.invoke(task_state, {"configurable": {"thread_id": task_id}})
+
     for idx, question in enumerate(questions, start=1):
         reset_vision_state()
         task_id = question.get("task_id")
@@ -205,10 +214,23 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
             "iterations": 0
         }
 
-        from lilith_agent.memory import ephemeral_memory
         try:
-            with ephemeral_memory():
-                result = graph.invoke(state, {"configurable": {"thread_id": task_id}})
+            try:
+                result = _invoke_task_once(state, task_id)
+            except RateLimitCooldownError as exc:
+                log_runner.warning(
+                    "[runner] task=%s rate limited provider=%s model=%s cooldown=%s",
+                    task_id,
+                    exc.provider,
+                    exc.model,
+                    exc.cooldown_seconds,
+                )
+                time.sleep(exc.cooldown_seconds)
+                result = _invoke_task_once(state, task_id)
+        except RateLimitCooldownError as exc:
+            log_runner.warning("[runner] task=%s rate limited after retry: %s", task_id, exc)
+            answers.append({"task_id": task_id, "submitted_answer": "AGENT ERROR: RATE LIMITED"})
+            continue
         except Exception as exc:
             log_runner.warning("[runner] task=%s agent error: %s", task_id, exc)
             answers.append(
