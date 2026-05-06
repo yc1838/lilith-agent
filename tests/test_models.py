@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import AsyncMock
 
 from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_core.messages import AIMessage
@@ -388,5 +389,37 @@ def test_bound_retry_wrapper_raises_cooldown_for_gemini_lane(monkeypatch):
 
     with pytest.raises(RateLimitCooldownError) as raised:
         bound.invoke([("user", "hi")])
+
+    assert raised.value.model == "gemini-3.1-pro"
+
+
+@pytest.mark.asyncio
+async def test_async_retry_wrapper_raises_cooldown_for_gemini_lane(monkeypatch):
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_client_error(429)
+    monkeypatch.setattr("lilith_agent.models.asyncio.sleep", AsyncMock())
+    wrapper = _RetryWrapper.model_construct(
+        inner=_FailingGenerateModel(exc), provider="google", model_name="gemini-3.1-pro"
+    )
+
+    with pytest.raises(RateLimitCooldownError) as raised:
+        await wrapper._agenerate([])
+
+    assert raised.value.model == "gemini-3.1-pro"
+
+
+@pytest.mark.asyncio
+async def test_async_bound_retry_wrapper_raises_cooldown_for_gemini_lane(monkeypatch):
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_client_error(429)
+    monkeypatch.setattr("lilith_agent.models.asyncio.sleep", AsyncMock())
+    wrapper = _RetryWrapper.model_construct(
+        inner=_FailingGenerateModel(exc), provider="google", model_name="gemini-3.1-pro"
+    )
+
+    bound = wrapper.bind_tools([])
+
+    with pytest.raises(RateLimitCooldownError) as raised:
+        await bound.ainvoke([("user", "hi")])
 
     assert raised.value.model == "gemini-3.1-pro"
