@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 from langchain_anthropic import ChatAnthropic
@@ -106,6 +107,68 @@ log = logging.getLogger(__name__)
 
 LMSTUDIO_DEFAULT_BASE_URL = "http://localhost:1234/v1"
 _NO_THINK = "/no_think"
+_GEMINI_COOLDOWN_MODELS = {"gemini-3-flash-preview", "gemini-3.1-pro"}
+_COOLDOWN_LADDER_SECONDS = (60, 120, 300)
+_cooldown_until: dict[tuple[str, str], float] = {}
+_rate_limit_exhaustions: dict[tuple[str, str], int] = {}
+
+
+@dataclass
+class RateLimitCooldownError(Exception):
+    provider: str
+    model: str
+    cooldown_seconds: int
+    original_error: str
+
+    def __str__(self) -> str:
+        return (
+            f"rate limited provider={self.provider} model={self.model} "
+            f"cooldown={self.cooldown_seconds}s original={self.original_error}"
+        )
+
+
+def _reset_rate_limit_state_for_tests() -> None:
+    _cooldown_until.clear()
+    _rate_limit_exhaustions.clear()
+
+
+def _gemini_lane(provider: str | None, model_name: str | None) -> tuple[str, str] | None:
+    if provider == "google" and model_name in _GEMINI_COOLDOWN_MODELS:
+        return (provider, model_name)
+    return None
+
+
+def _cooldown_seconds_for_exhaustion(count: int) -> int:
+    idx = min(max(count, 1), len(_COOLDOWN_LADDER_SECONDS)) - 1
+    return _COOLDOWN_LADDER_SECONDS[idx]
+
+
+def _sleep_active_cooldown(lane: tuple[str, str] | None) -> None:
+    if lane is None:
+        return
+    remaining = _cooldown_until.get(lane, 0.0) - time.monotonic()
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+def _record_success(lane: tuple[str, str] | None) -> None:
+    if lane is None:
+        return
+    _rate_limit_exhaustions[lane] = 0
+    _cooldown_until.pop(lane, None)
+
+
+def _record_exhausted_rate_limit(lane: tuple[str, str], exc: BaseException) -> RateLimitCooldownError:
+    count = _rate_limit_exhaustions.get(lane, 0) + 1
+    _rate_limit_exhaustions[lane] = count
+    cooldown = _cooldown_seconds_for_exhaustion(count)
+    _cooldown_until[lane] = time.monotonic() + cooldown
+    return RateLimitCooldownError(
+        provider=lane[0],
+        model=lane[1],
+        cooldown_seconds=cooldown,
+        original_error=str(exc),
+    )
 
 
 class _NoThinkWrapper(BaseChatModel):
@@ -170,15 +233,26 @@ class _RetryWrapper(BaseChatModel):
     """Wraps any BaseChatModel to apply exponential backoff on 429 errors."""
 
     inner: BaseChatModel
+    provider: str | None = None
+    model_name: str | None = None
 
     @property
     def _llm_type(self) -> str:
         return f"retry-{self.inner._llm_type}"
 
     def _generate(self, *args, **kwargs):
-        for attempt in Retrying(**_sync_retry_params()):
-            with attempt:
-                return self.inner._generate(*args, **kwargs)
+        lane = _gemini_lane(self.provider, self.model_name)
+        _sleep_active_cooldown(lane)
+        try:
+            for attempt in Retrying(**_sync_retry_params()):
+                with attempt:
+                    result = self.inner._generate(*args, **kwargs)
+                    _record_success(lane)
+                    return result
+        except Exception as exc:
+            if lane is not None and is_retryable_rate_limit(exc):
+                raise _record_exhausted_rate_limit(lane, exc) from exc
+            raise
 
     async def _agenerate(self, *args, **kwargs):
         async for attempt in AsyncRetrying(**_async_retry_params()):
@@ -217,7 +291,7 @@ def _build(provider: str, model: str, cfg: Config) -> BaseChatModel:
     
     # helper to wrap final model
     def _wrap(m):
-        return _RetryWrapper(inner=m)
+        return _RetryWrapper(inner=m, provider=provider, model_name=model)
 
     if provider == "ollama":
         return _wrap(ChatOllama(model=model, num_predict=max_tokens))
