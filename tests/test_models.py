@@ -9,6 +9,7 @@ from lilith_agent.models import (
     _NoThinkWrapper,
     _BoundRetryWrapper,
     _BoundNoThinkWrapper,
+    BatchAbortRateLimitError,
     RateLimitCooldownError,
     _reset_rate_limit_state_for_tests,
     is_retryable_rate_limit,
@@ -251,3 +252,62 @@ def test_unknown_google_model_does_not_get_gemini_cooldown(monkeypatch):
 
     with pytest.raises(type(exc)):
         wrapper._generate([])
+
+
+def _make_genai_quota_error(details: list[dict]):
+    pytest.importorskip("google.genai.errors")
+    from google.genai.errors import ClientError
+
+    return ClientError(
+        429,
+        {
+            "error": {
+                "code": 429,
+                "status": "RESOURCE_EXHAUSTED",
+                "message": "quota exceeded",
+                "details": details,
+            }
+        },
+    )
+
+
+def test_daily_quota_metadata_raises_batch_abort(monkeypatch):
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_quota_error(
+        [
+            {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel"}],
+            }
+        ]
+    )
+    monkeypatch.setattr("lilith_agent.models.time.sleep", lambda _: None)
+    wrapper = _RetryWrapper.model_construct(
+        inner=_FailingGenerateModel(exc), provider="google", model_name="gemini-3.1-pro"
+    )
+
+    with pytest.raises(BatchAbortRateLimitError) as raised:
+        wrapper._generate([])
+
+    assert "daily" in raised.value.reason.lower()
+
+
+def test_long_retry_delay_raises_batch_abort(monkeypatch):
+    _reset_rate_limit_state_for_tests()
+    exc = _make_genai_quota_error(
+        [
+            {
+                "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                "retryDelay": "900s",
+            }
+        ]
+    )
+    monkeypatch.setattr("lilith_agent.models.time.sleep", lambda _: None)
+    wrapper = _RetryWrapper.model_construct(
+        inner=_FailingGenerateModel(exc), provider="google", model_name="gemini-3.1-pro"
+    )
+
+    with pytest.raises(BatchAbortRateLimitError) as raised:
+        wrapper._generate([])
+
+    assert "retry" in raised.value.reason.lower()

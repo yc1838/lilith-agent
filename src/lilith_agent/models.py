@@ -127,6 +127,15 @@ class RateLimitCooldownError(Exception):
         )
 
 
+@dataclass
+class BatchAbortRateLimitError(Exception):
+    reason: str
+    original_error: str
+
+    def __str__(self) -> str:
+        return f"batch abort rate limit: {self.reason}; original={self.original_error}"
+
+
 def _reset_rate_limit_state_for_tests() -> None:
     _cooldown_until.clear()
     _rate_limit_exhaustions.clear()
@@ -169,6 +178,40 @@ def _record_exhausted_rate_limit(lane: tuple[str, str], exc: BaseException) -> R
         cooldown_seconds=cooldown,
         original_error=str(exc),
     )
+
+
+def _iter_error_details(exc: BaseException) -> list[dict[str, Any]]:
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        nested = details.get("error", {}).get("details", details.get("details", []))
+        return nested if isinstance(nested, list) else []
+    return details if isinstance(details, list) else []
+
+
+def _parse_retry_delay_seconds(value: Any) -> float | None:
+    if isinstance(value, str) and value.endswith("s"):
+        try:
+            return float(value[:-1])
+        except ValueError:
+            return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _batch_abort_reason(exc: BaseException) -> str | None:
+    for detail in _iter_error_details(exc):
+        retry_delay = _parse_retry_delay_seconds(detail.get("retryDelay"))
+        if retry_delay is not None and retry_delay > 600:
+            return f"retry delay {retry_delay:g}s exceeds batch threshold"
+        violations = detail.get("violations", [])
+        if isinstance(violations, list):
+            for violation in violations:
+                if isinstance(violation, dict) and "PerDay" in str(violation.get("quotaId", "")):
+                    return f"daily quota exhausted: {violation.get('quotaId')}"
+        if "PerDay" in str(detail.get("quotaId", "")):
+            return f"daily quota exhausted: {detail.get('quotaId')}"
+    return None
 
 
 class _NoThinkWrapper(BaseChatModel):
@@ -251,6 +294,9 @@ class _RetryWrapper(BaseChatModel):
                     return result
         except Exception as exc:
             if lane is not None and is_retryable_rate_limit(exc):
+                reason = _batch_abort_reason(exc)
+                if reason is not None:
+                    raise BatchAbortRateLimitError(reason=reason, original_error=str(exc)) from exc
                 raise _record_exhausted_rate_limit(lane, exc) from exc
             raise
 
