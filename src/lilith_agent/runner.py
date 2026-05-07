@@ -164,6 +164,8 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
         BatchAbortRateLimitError,
         QuestionRateLimitStreakError,
         RateLimitCooldownError,
+        batch_rate_limit_pause_seconds,
+        clear_batch_rate_limit_window,
         get_cheap_model,
         rate_limit_question_scope,
     )
@@ -178,6 +180,14 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
         with rate_limit_question_scope():
             with ephemeral_memory():
                 return graph.invoke(task_state, {"configurable": {"thread_id": task_id}})
+
+    def _maybe_pause_for_batch_rate_limit() -> None:
+        pause_seconds = batch_rate_limit_pause_seconds()
+        if pause_seconds is None:
+            return
+        log_runner.warning("[runner] pausing batch for %ss due to rate limit window", pause_seconds)
+        time.sleep(pause_seconds)
+        clear_batch_rate_limit_window()
 
     for idx, question in enumerate(questions, start=1):
         reset_vision_state()
@@ -236,10 +246,12 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
         except RateLimitCooldownError as exc:
             log_runner.warning("[runner] task=%s rate limited after retry: %s", task_id, exc)
             answers.append({"task_id": task_id, "submitted_answer": "AGENT ERROR: RATE LIMITED"})
+            _maybe_pause_for_batch_rate_limit()
             continue
         except QuestionRateLimitStreakError as exc:
             log_runner.warning("[runner] task=%s rate limit streak: %s", task_id, exc)
             answers.append({"task_id": task_id, "submitted_answer": "AGENT ERROR: RATE LIMITED"})
+            _maybe_pause_for_batch_rate_limit()
             continue
         except BatchAbortRateLimitError as exc:
             log_runner.warning("[runner] task=%s batch abort rate limit: %s", task_id, exc)
@@ -261,6 +273,7 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
                     "submitted_answer": f"AGENT ERROR: {exc}",
                 }
             )
+            _maybe_pause_for_batch_rate_limit()
             continue
 
         last_m = result["messages"][-1]
@@ -297,6 +310,7 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
             (submitted_answer[:160] + "…") if len(submitted_answer) > 160 else submitted_answer,
         )
         answers.append({"task_id": task_id, "submitted_answer": submitted_answer.strip()})
+        _maybe_pause_for_batch_rate_limit()
 
     return answers
 

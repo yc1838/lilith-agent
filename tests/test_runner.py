@@ -227,3 +227,33 @@ def test_runner_stops_batch_and_writes_abort_marker_on_daily_quota(tmp_path: Pat
     assert data["reason"] == "daily quota exhausted"
     assert not (tmp_path / "task-abort.json").exists()
     assert not (tmp_path / "task-never.json").exists()
+
+
+class _GraphAlwaysSucceeds:
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, state, config):
+        self.calls += 1
+        return {"messages": [AIMessage(content=f"answer-{self.calls}")]}
+
+
+def test_runner_pauses_batch_when_window_trips(monkeypatch, tmp_path: Path):
+    pauses = [300, None]
+    sleeps = []
+    monkeypatch.setattr("lilith_agent.models.batch_rate_limit_pause_seconds", lambda: pauses.pop(0))
+    monkeypatch.setattr("lilith_agent.models.clear_batch_rate_limit_window", lambda: None)
+    monkeypatch.setattr("lilith_agent.runner.time.sleep", sleeps.append)
+    monkeypatch.setattr("lilith_agent.runner._final_formatting_cleanup", lambda model, question, raw, llm_formatter_enabled=True: raw)
+
+    answers = run_agent_on_questions(
+        _GraphAlwaysSucceeds(),
+        [
+            {"task_id": "task-a", "question": "a"},
+            {"task_id": "task-b", "question": "b"},
+        ],
+        tmp_path,
+    )
+
+    assert sleeps == [300]
+    assert [answer["task_id"] for answer in answers] == ["task-a", "task-b"]
