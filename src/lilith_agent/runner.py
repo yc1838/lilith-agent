@@ -160,7 +160,13 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
     answers: list[dict] = []
 
     from lilith_agent.config import Config
-    from lilith_agent.models import RateLimitCooldownError, get_cheap_model, rate_limit_question_scope
+    from lilith_agent.models import (
+        BatchAbortRateLimitError,
+        QuestionRateLimitStreakError,
+        RateLimitCooldownError,
+        get_cheap_model,
+        rate_limit_question_scope,
+    )
     cfg = Config.from_env()
     cheap_model = get_cheap_model(cfg)
 
@@ -231,6 +237,22 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
             log_runner.warning("[runner] task=%s rate limited after retry: %s", task_id, exc)
             answers.append({"task_id": task_id, "submitted_answer": "AGENT ERROR: RATE LIMITED"})
             continue
+        except QuestionRateLimitStreakError as exc:
+            log_runner.warning("[runner] task=%s rate limit streak: %s", task_id, exc)
+            answers.append({"task_id": task_id, "submitted_answer": "AGENT ERROR: RATE LIMITED"})
+            continue
+        except BatchAbortRateLimitError as exc:
+            log_runner.warning("[runner] task=%s batch abort rate limit: %s", task_id, exc)
+            answers.append({"task_id": task_id, "submitted_answer": "AGENT ERROR: RATE LIMITED"})
+            _write_checkpoint_atomic(
+                checkpoint_root / "rate_limit_abort.json",
+                {
+                    "task_id": task_id,
+                    "reason": exc.reason,
+                    "original_error": exc.original_error,
+                },
+            )
+            return answers
         except Exception as exc:
             log_runner.warning("[runner] task=%s agent error: %s", task_id, exc)
             answers.append(

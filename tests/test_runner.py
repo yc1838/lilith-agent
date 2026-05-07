@@ -8,7 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from lilith_agent.config import Config
-from lilith_agent.models import RateLimitCooldownError
+from lilith_agent.models import BatchAbortRateLimitError, QuestionRateLimitStreakError, RateLimitCooldownError
 from lilith_agent.runner import run_agent_on_questions, _wrap_user_question, _write_checkpoint_atomic
 
 
@@ -183,3 +183,47 @@ def test_runner_uses_fresh_ephemeral_memory_for_retry(monkeypatch, tmp_path: Pat
     )
 
     assert events == ["enter", "exit", "enter", "exit"]
+
+
+class _GraphQuestionStreak:
+    def invoke(self, state, config):
+        raise QuestionRateLimitStreakError(count=50)
+
+
+class _GraphBatchAbort:
+    def invoke(self, state, config):
+        raise BatchAbortRateLimitError(reason="daily quota exhausted", original_error="429")
+
+
+def test_runner_skips_question_on_rate_limit_streak(tmp_path: Path):
+    answers = run_agent_on_questions(
+        _GraphQuestionStreak(),
+        [
+            {"task_id": "task-streak", "question": "first"},
+            {"task_id": "task-next", "question": "second"},
+        ],
+        tmp_path,
+    )
+
+    assert answers[0] == {"task_id": "task-streak", "submitted_answer": "AGENT ERROR: RATE LIMITED"}
+    assert not (tmp_path / "task-streak.json").exists()
+
+
+def test_runner_stops_batch_and_writes_abort_marker_on_daily_quota(tmp_path: Path):
+    answers = run_agent_on_questions(
+        _GraphBatchAbort(),
+        [
+            {"task_id": "task-abort", "question": "first"},
+            {"task_id": "task-never", "question": "second"},
+        ],
+        tmp_path,
+    )
+
+    assert answers == [{"task_id": "task-abort", "submitted_answer": "AGENT ERROR: RATE LIMITED"}]
+    marker = tmp_path / "rate_limit_abort.json"
+    assert marker.exists()
+    data = json.loads(marker.read_text())
+    assert data["task_id"] == "task-abort"
+    assert data["reason"] == "daily quota exhausted"
+    assert not (tmp_path / "task-abort.json").exists()
+    assert not (tmp_path / "task-never.json").exists()
