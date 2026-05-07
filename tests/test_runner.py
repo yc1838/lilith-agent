@@ -159,3 +159,27 @@ def test_runner_does_not_checkpoint_when_rate_limited_twice(monkeypatch, tmp_pat
     assert graph.calls == 2
     assert answers == [{"task_id": "task-rl", "submitted_answer": "AGENT ERROR: RATE LIMITED"}]
     assert not (tmp_path / "task-rl.json").exists()
+
+
+def test_runner_uses_fresh_ephemeral_memory_for_retry(monkeypatch, tmp_path: Path):
+    graph = _GraphFailsOnceWithCooldown()
+    events = []
+
+    class _FakeEphemeralMemory:
+        def __enter__(self):
+            events.append("enter")
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append("exit")
+
+    monkeypatch.setattr("lilith_agent.memory.ephemeral_memory", lambda: _FakeEphemeralMemory())
+    monkeypatch.setattr("lilith_agent.runner._final_formatting_cleanup", lambda model, question, raw, llm_formatter_enabled=True: raw)
+    monkeypatch.setattr("lilith_agent.runner.time.sleep", lambda _: None)
+
+    run_agent_on_questions(
+        graph,
+        [{"task_id": "task-memory", "question": "What is isolated?"}],
+        tmp_path,
+    )
+
+    assert events == ["enter", "exit", "enter", "exit"]
