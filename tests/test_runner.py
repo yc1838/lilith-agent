@@ -129,3 +129,33 @@ def test_runner_retries_same_question_once_after_cooldown(monkeypatch, tmp_path:
     assert sleeps == [12]
     assert answers == [{"task_id": "task-1", "submitted_answer": "Final Answer: 42"}]
     assert (tmp_path / "task-1.json").exists()
+
+
+class _GraphAlwaysCooldown:
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, state, config):
+        self.calls += 1
+        raise RateLimitCooldownError(
+            provider="google",
+            model="gemini-3.1-pro",
+            cooldown_seconds=3,
+            original_error="429",
+        )
+
+
+def test_runner_does_not_checkpoint_when_rate_limited_twice(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("lilith_agent.runner._final_formatting_cleanup", lambda model, question, raw, llm_formatter_enabled=True: raw)
+    monkeypatch.setattr("lilith_agent.runner.time.sleep", lambda _: None)
+    graph = _GraphAlwaysCooldown()
+
+    answers = run_agent_on_questions(
+        graph,
+        [{"task_id": "task-rl", "question": "rate limited?"}],
+        tmp_path,
+    )
+
+    assert graph.calls == 2
+    assert answers == [{"task_id": "task-rl", "submitted_answer": "AGENT ERROR: RATE LIMITED"}]
+    assert not (tmp_path / "task-rl.json").exists()
