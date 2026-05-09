@@ -104,6 +104,43 @@ def _needs_llm_formatter(s: str) -> bool:
     return any(p in lower for p in _FILLER_PHRASES)
 
 
+def _is_safe_llm_formatter_output(source: str, cleaned: str) -> bool:
+    if not cleaned:
+        return False
+    if cleaned == source:
+        return True
+    start = source.find(cleaned)
+    if start == -1:
+        return False
+    end = start + len(cleaned)
+    before = source[start - 1] if start > 0 else ""
+    after = source[end] if end < len(source) else ""
+    if before.isalnum() or before == "_":
+        return False
+    if after.isalnum() or after == "_":
+        return False
+    return True
+
+
+def _expand_to_source_token(source: str, cleaned: str) -> str | None:
+    if not cleaned:
+        return None
+    start = source.find(cleaned)
+    if start == -1:
+        return None
+    end = start + len(cleaned)
+    token_start = start
+    while token_start > 0 and (source[token_start - 1].isalnum() or source[token_start - 1] == "_"):
+        token_start -= 1
+    token_end = end
+    while token_end < len(source) and (source[token_end].isalnum() or source[token_end] == "_"):
+        token_end += 1
+    if token_start == start and token_end == end:
+        return None
+    token = source[token_start:token_end].strip()
+    return token or None
+
+
 def _write_checkpoint_atomic(path: Path, data: dict) -> None:
     """Serialize first, then rename. A crash mid-serialize leaves the prior file intact.
 
@@ -264,7 +301,8 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
                     "original_error": exc.original_error,
                 },
             )
-            return answers
+            _maybe_pause_for_batch_rate_limit()
+            continue
         except Exception as exc:
             log_runner.warning("[runner] task=%s agent error: %s", task_id, exc)
             answers.append(
@@ -373,6 +411,13 @@ def _final_formatting_cleanup(
         cleaned = cleaned.strip()
         if not cleaned:
             log.warning("formatter: LLM returned empty, falling back to deterministic")
+            return determ
+        if not _is_safe_llm_formatter_output(determ, cleaned):
+            expanded = _expand_to_source_token(determ, cleaned)
+            if expanded:
+                log.warning("formatter: expanded unsafe LLM substring to source token")
+                return expanded
+            log.warning("formatter: rejected unsafe LLM rewrite, falling back to deterministic")
             return determ
         log.info("formatter: LLM returned out_len=%d", len(cleaned))
         return cleaned

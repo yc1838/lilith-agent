@@ -48,6 +48,28 @@ def test_summarize_episode_stores_list_block_content_as_text(tmp_path, monkeypat
     assert episodes[0]["summary"] == "Captured lesson"
 
 
+def test_summarize_episode_logs_saved_episode_details(tmp_path, monkeypatch, caplog):
+    from lilith_agent import memory
+
+    class FakeModel:
+        def invoke(self, prompt):
+            class Response:
+                content = "Used read_file successfully and learned to inspect spreadsheet rows."
+
+            return Response()
+
+    store = memory.MemoryStore(tmp_path / "long_term_memory.sqlite")
+    monkeypatch.setattr(memory, "_store", store)
+
+    with caplog.at_level(logging.INFO, logger="lilith_agent.memory"):
+        memory.summarize_episode([HumanMessage(content="Find oldest Blu-Ray title")], FakeModel())
+
+    record = next(r for r in caplog.records if "[memory] Episode saved:" in r.message)
+    assert "task='Find oldest Blu-Ray title'" in record.message
+    assert "outcome='success'" in record.message
+    assert "summary='Used read_file successfully" in record.message
+
+
 def test_summarize_episode_logs_traceback_on_failure(tmp_path, monkeypatch, caplog):
     from lilith_agent import memory
 

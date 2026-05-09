@@ -16,6 +16,7 @@ LILITH_HOME = Path(os.getenv("LILITH_HOME", ".lilith"))
 MEMORY_DB_PATH = LILITH_HOME / "long_term_memory.sqlite"
 MEMORY_CONTEXT_CHAR_BUDGET = 3000
 MIN_MESSAGES_FOR_EXTRACTION = 2
+MEMORY_LOG_PREVIEW_CHARS = 300
 
 def _content_to_text(content: Any) -> str:
     if content is None:
@@ -44,6 +45,13 @@ def _memory_content_to_text(content: Any) -> str:
     if hasattr(content, "content"):
         return _content_to_text(content.content)
     return _content_to_text(content)
+
+
+def _preview_for_log(text: str, limit: int = MEMORY_LOG_PREVIEW_CHARS) -> str:
+    compact = " ".join(str(text).split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1] + "…"
 
 class MemoryStore:
     def __init__(self, db_path: Union[Path, str] = MEMORY_DB_PATH):
@@ -305,8 +313,14 @@ Briefly explain:
 Keep it under 150 words.
 """
         response = model.invoke(prompt)
-        _store.add_episode(initial_question, _content_to_text(response.content), outcome)
-        log.info("[memory] Episode saved.")
+        summary = _content_to_text(response.content)
+        _store.add_episode(initial_question, summary, outcome)
+        log.info(
+            "[memory] Episode saved: task=%r outcome=%r summary=%r",
+            _preview_for_log(initial_question),
+            outcome,
+            _preview_for_log(summary),
+        )
     except Exception:
         log.exception("[memory] Summarization failed")
 

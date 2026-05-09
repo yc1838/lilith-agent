@@ -3,7 +3,8 @@ from unittest.mock import MagicMock
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool as tool_decorator
 
-from lilith_agent.app import _build_tool_node, _cooldown_limit_for, _route_after_model
+from lilith_agent.app import _build_tool_node, _cooldown_limit_for, _route_after_model, build_react_agent
+from lilith_agent.config import Config
 
 
 @tool_decorator
@@ -24,6 +25,306 @@ def test_router_goes_to_tools_when_tool_calls_present():
 def test_router_ends_when_no_tool_calls():
     state = {"messages": [AIMessage(content="done")]}
     assert _route_after_model(state) == "extract_memory"
+
+
+def test_graph_returns_fail_safe_answer_when_hard_cap_hits_near_recursion_limit(monkeypatch, tmp_path):
+    class FakeModel:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        def invoke(self, messages):
+            if "SYSTEM EMERGENCY OVERRIDE" in str(messages[0].content):
+                return AIMessage(content="Final Answer: best effort answer")
+            self.calls += 1
+            return _ai_with_calls([
+                {
+                    "id": f"call-{self.calls}",
+                    "name": "echo_tool",
+                    "args": {"text": str(self.calls)},
+                }
+            ])
+
+    fake_model = FakeModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 4
+    cfg.budget_hard_cap = 2
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: fake_model)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: fake_model)
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="answer this")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "hard-cap-test"}},
+    )
+
+    assert result["messages"][-1].content == "Final Answer: best effort answer"
+
+
+def test_fail_safe_uses_unbound_model_to_prevent_more_tool_calls(monkeypatch, tmp_path):
+    class FakeBoundModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return _ai_with_calls([
+                {
+                    "id": f"bound-call-{self.calls}",
+                    "name": "echo_tool",
+                    "args": {"text": str(self.calls)},
+                }
+            ])
+
+    class FakeModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+
+        def bind_tools(self, tools):
+            return self.bound
+
+        def invoke(self, messages):
+            return AIMessage(content="Final Answer: unbound best effort")
+
+    fake_model = FakeModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 4
+    cfg.budget_hard_cap = 1
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: fake_model)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: fake_model)
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="answer this")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "unbound-fail-safe-test"}},
+    )
+
+    assert result["messages"][-1].content == "Final Answer: unbound best effort"
+    assert not getattr(result["messages"][-1], "tool_calls", None)
+
+
+def test_supervisor_nudges_agent_to_answer_when_evidence_is_enough(monkeypatch, tmp_path):
+    class FakeBoundModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            if any("SUPERVISOR" in str(getattr(m, "content", "")) for m in messages):
+                return AIMessage(content="Final Answer: backtick")
+            return _ai_with_calls([
+                {
+                    "id": f"call-{self.calls}",
+                    "name": "echo_tool",
+                    "args": {"text": "Add `: 'For penguins\\n'"},
+                }
+            ])
+
+    class FakeStrongModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+
+        def bind_tools(self, tools):
+            return self.bound
+
+        def invoke(self, messages):
+            return AIMessage(content="Final Answer: fallback")
+
+    class FakeSupervisorModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return AIMessage(content='{"status":"nudge","best_answer":"backtick","guidance":"You have verified the answer. Stop and answer backtick."}')
+
+    strong = FakeStrongModel()
+    supervisor = FakeSupervisorModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 10
+    cfg.budget_hard_cap = 99
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: supervisor)
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="Unlambda question")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "supervisor-nudge-test"}},
+    )
+
+    assert result["messages"][-1].content == "Final Answer: backtick"
+    assert supervisor.calls == 1
+    assert strong.bound.calls == 2
+
+
+def test_supervisor_finalizes_when_agent_ignores_prior_nudge(monkeypatch, tmp_path):
+    class FakeBoundModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return _ai_with_calls([
+                {
+                    "id": f"call-{self.calls}",
+                    "name": "echo_tool",
+                    "args": {"text": str(self.calls)},
+                }
+            ])
+
+    class FakeStrongModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+
+        def bind_tools(self, tools):
+            return self.bound
+
+        def invoke(self, messages):
+            return AIMessage(content="Final Answer: fallback")
+
+    class FakeSupervisorModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return AIMessage(content='{"status":"nudge","best_answer":"backtick","guidance":"Stop. Existing evidence supports backtick."}')
+
+    strong = FakeStrongModel()
+    supervisor = FakeSupervisorModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 12
+    cfg.budget_hard_cap = 99
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: supervisor)
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="Unlambda question")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "supervisor-finalize-test"}},
+    )
+
+    assert result["messages"][-1].content == "Final Answer: backtick"
+    assert supervisor.calls == 2
+    assert strong.bound.calls == 2
+
+
+def test_supervisor_overhead_leaves_room_for_hard_cap_fail_safe(monkeypatch, tmp_path):
+    class FakeBoundModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return _ai_with_calls([
+                {
+                    "id": f"call-{self.calls}",
+                    "name": "echo_tool",
+                    "args": {"text": str(self.calls)},
+                }
+            ])
+
+    class FakeStrongModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+
+        def bind_tools(self, tools):
+            return self.bound
+
+        def invoke(self, messages):
+            return AIMessage(content="Final Answer: hard cap fallback")
+
+    class FakeSupervisorModel:
+        def invoke(self, messages):
+            return AIMessage(content='{"status":"continue"}')
+
+    strong = FakeStrongModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 8
+    cfg.budget_hard_cap = 5
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: FakeSupervisorModel())
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="force hard cap")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "supervisor-hard-cap-headroom-test"}},
+    )
+
+    assert result["messages"][-1].content == "Final Answer: hard cap fallback"
+
+
+def test_supervisor_overhead_leaves_room_for_iteration_fail_safe(monkeypatch, tmp_path):
+    class FakeBoundModel:
+        def invoke(self, messages):
+            return _ai_with_calls([
+                {
+                    "id": "call",
+                    "name": "echo_tool",
+                    "args": {"text": "loop"},
+                }
+            ])
+
+    class FakeStrongModel:
+        def bind_tools(self, tools):
+            return FakeBoundModel()
+
+        def invoke(self, messages):
+            return AIMessage(content="Final Answer: iteration fallback")
+
+    class FakeSupervisorModel:
+        def invoke(self, messages):
+            return AIMessage(content='{"status":"continue"}')
+
+    cfg = Config.from_env()
+    cfg.recursion_limit = 5
+    cfg.budget_hard_cap = 99
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: FakeStrongModel())
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: FakeSupervisorModel())
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="force iteration cap")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "supervisor-iteration-headroom-test"}},
+    )
+
+    assert result["messages"][-1].content == "Final Answer: iteration fallback"
 
 
 def test_tool_node_invokes_tool_and_returns_tool_message():

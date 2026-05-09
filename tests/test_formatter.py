@@ -138,6 +138,33 @@ def test_verbose_answer_invokes_llm_by_default():
     assert out == "42"
 
 
+def test_llm_formatter_expands_word_internal_substring_to_full_token():
+    from lilith_agent.runner import _final_formatting_cleanup
+
+    raw = "The answer is foobarbaz."
+    model = _FakeModel(response="baz")
+
+    out = _final_formatting_cleanup(model, "Which token?", raw)
+
+    assert model.called is True
+    assert out == "foobarbaz"
+
+
+def test_llm_formatter_accepts_whole_phrase_extraction():
+    from lilith_agent.runner import _final_formatting_cleanup
+
+    model = _FakeModel(response="Mount Everest")
+
+    out = _final_formatting_cleanup(
+        model,
+        "Which mountain?",
+        "Based on the evidence, the answer is Mount Everest.",
+    )
+
+    assert model.called is True
+    assert out == "Mount Everest"
+
+
 def test_llm_formatter_disabled_returns_deterministic_only():
     from lilith_agent.runner import _final_formatting_cleanup
 

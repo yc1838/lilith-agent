@@ -190,9 +190,15 @@ class _GraphQuestionStreak:
         raise QuestionRateLimitStreakError(count=50)
 
 
-class _GraphBatchAbort:
+class _GraphBatchAbortThenSucceeds:
+    def __init__(self):
+        self.calls = 0
+
     def invoke(self, state, config):
-        raise BatchAbortRateLimitError(reason="daily quota exhausted", original_error="429")
+        self.calls += 1
+        if self.calls == 1:
+            raise BatchAbortRateLimitError(reason="daily quota exhausted", original_error="429")
+        return {"messages": [AIMessage(content="next answer")]}
 
 
 def test_runner_skips_question_on_rate_limit_streak(tmp_path: Path):
@@ -209,9 +215,12 @@ def test_runner_skips_question_on_rate_limit_streak(tmp_path: Path):
     assert not (tmp_path / "task-streak.json").exists()
 
 
-def test_runner_stops_batch_and_writes_abort_marker_on_daily_quota(tmp_path: Path):
+def test_runner_continues_batch_and_writes_abort_marker_on_daily_quota(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("lilith_agent.runner._final_formatting_cleanup", lambda model, question, raw, llm_formatter_enabled=True: raw)
+    graph = _GraphBatchAbortThenSucceeds()
+
     answers = run_agent_on_questions(
-        _GraphBatchAbort(),
+        graph,
         [
             {"task_id": "task-abort", "question": "first"},
             {"task_id": "task-never", "question": "second"},
@@ -219,14 +228,18 @@ def test_runner_stops_batch_and_writes_abort_marker_on_daily_quota(tmp_path: Pat
         tmp_path,
     )
 
-    assert answers == [{"task_id": "task-abort", "submitted_answer": "AGENT ERROR: RATE LIMITED"}]
+    assert graph.calls == 2
+    assert answers == [
+        {"task_id": "task-abort", "submitted_answer": "AGENT ERROR: RATE LIMITED"},
+        {"task_id": "task-never", "submitted_answer": "next answer"},
+    ]
     marker = tmp_path / "rate_limit_abort.json"
     assert marker.exists()
     data = json.loads(marker.read_text())
     assert data["task_id"] == "task-abort"
     assert data["reason"] == "daily quota exhausted"
     assert not (tmp_path / "task-abort.json").exists()
-    assert not (tmp_path / "task-never.json").exists()
+    assert (tmp_path / "task-never.json").exists()
 
 
 class _GraphAlwaysSucceeds:
