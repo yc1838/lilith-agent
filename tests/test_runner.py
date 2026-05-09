@@ -127,7 +127,7 @@ def test_runner_retries_same_question_once_after_cooldown(monkeypatch, tmp_path:
     assert graph.calls == 2
     assert graph.thread_ids == ["task-1", "task-1"]
     assert sleeps == [12]
-    assert answers == [{"task_id": "task-1", "submitted_answer": "Final Answer: 42"}]
+    assert answers == [{"task_id": "task-1", "submitted_answer": "42"}]
     assert (tmp_path / "task-1.json").exists()
 
 
@@ -249,6 +249,23 @@ class _GraphAlwaysSucceeds:
     def invoke(self, state, config):
         self.calls += 1
         return {"messages": [AIMessage(content=f"answer-{self.calls}")]}
+
+
+class _GraphReturnsAssignmentAnswer:
+    def invoke(self, state, config):
+        return {"messages": [AIMessage(content="x = 563.9")]}
+
+
+def test_runner_applies_gaia_submission_normalizer(tmp_path: Path):
+    answers = run_agent_on_questions(
+        _GraphReturnsAssignmentAnswer(),
+        [{"task_id": "task-normalize", "question": "What is x?"}],
+        tmp_path,
+    )
+
+    assert answers == [{"task_id": "task-normalize", "submitted_answer": "563.9"}]
+    checkpoint = json.loads((tmp_path / "task-normalize.json").read_text())
+    assert checkpoint["submitted_answer"] == "563.9"
 
 
 def test_runner_pauses_batch_when_window_trips(monkeypatch, tmp_path: Path):

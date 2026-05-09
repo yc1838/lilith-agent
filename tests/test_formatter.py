@@ -194,6 +194,42 @@ def test_llm_formatter_disabled_still_applies_deterministic_strip():
     assert out == "42"
 
 
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("** 47", "47"),
+        ("** 8", "8"),
+        ("x = 563.9", "563.9"),
+        ("answer = 42", "42"),
+        ("result: 85", "85"),
+        ("56,000", "56000"),
+        ("3.1.3.1;1.11.1.7", "3.1.3.1; 1.11.1.7"),
+        ("Final Answer: **47**", "47"),
+    ],
+)
+def test_gaia_submission_normalizer_fixes_safe_formatting_artifacts(answer: str, expected: str):
+    from lilith_agent.runner import _normalize_gaia_submission
+
+    assert _normalize_gaia_submission("Q", answer) == expected
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "U.S.",
+        "Mr.",
+        "Paris, France",
+        "1,234.56",
+        "C**H",
+        "number of citations",
+    ],
+)
+def test_gaia_submission_normalizer_leaves_risky_answers_unchanged(answer: str):
+    from lilith_agent.runner import _normalize_gaia_submission
+
+    assert _normalize_gaia_submission("Q", answer) == answer
+
+
 def test_config_llm_formatter_enabled_defaults_on_and_is_env_overridable(monkeypatch):
     from lilith_agent.config import Config
 

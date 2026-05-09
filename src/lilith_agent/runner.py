@@ -53,6 +53,9 @@ _FILLER_PHRASES = (
     "to summarize",
 )
 _LLM_FORMATTER_LEN_GATE = 40
+_ASSIGNMENT_PREFIX = re.compile(r"^\s*(?:x|y|answer|result)\s*[:=]\s*(.+?)\s*$", re.IGNORECASE)
+_COMMA_GROUPED_INTEGER = re.compile(r"^[+-]?\d{1,3}(?:,\d{3})+$")
+_SCALAR_NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$")
 
 
 def _wrap_user_question(text: str) -> str:
@@ -139,6 +142,32 @@ def _expand_to_source_token(source: str, cleaned: str) -> str | None:
         return None
     token = source[token_start:token_end].strip()
     return token or None
+
+
+def _normalize_gaia_submission(question: str, answer: str) -> str:
+    s = _deterministic_format(answer).strip()
+    if s.startswith("**"):
+        candidate = s.lstrip("*").strip()
+        if candidate and "**" not in candidate:
+            s = candidate
+    if s.endswith("**"):
+        candidate = s.rstrip("*").strip()
+        if candidate and "**" not in candidate:
+            s = candidate
+
+    match = _ASSIGNMENT_PREFIX.match(s)
+    if match:
+        candidate = match.group(1).strip()
+        if _SCALAR_NUMBER.fullmatch(candidate):
+            s = candidate
+
+    if _COMMA_GROUPED_INTEGER.fullmatch(s):
+        s = s.replace(",", "")
+
+    if ";" in s:
+        s = re.sub(r"\s*;\s*", "; ", s).strip()
+
+    return s
 
 
 def _write_checkpoint_atomic(path: Path, data: dict) -> None:
@@ -329,6 +358,7 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
             submitted_answer,
             llm_formatter_enabled=cfg.llm_formatter_enabled,
         )
+        submitted_answer = _normalize_gaia_submission(prompt, submitted_answer)
         
         reasoning_trace = _render_reasoning_trace(result["messages"])
 
