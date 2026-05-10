@@ -139,6 +139,61 @@ def _is_placeholder_answer(answer: str) -> bool:
     return normalized in _PLACEHOLDER_ANSWERS
 
 
+_FORMAT_TRIGGERS = re.compile(
+    r"\b(only the first name|first name only|give only the first|just the first name|"
+    r"surname|last name only|give only the surname|single word|one word|"
+    r"in alphabetical order|alphabetized|comma[-\s]separated|comma[-\s]delimited|"
+    r"without (?:any )?(?:punctuation|units|prefix|suffix|abbreviation)|"
+    r"no (?:units|prefix|suffix|abbreviation|punctuation)|"
+    r"number only|numeric only|digits only|integer only|"
+    r"give only|just give|give just|provide only)\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_format_strip(question: str) -> bool:
+    return bool(_FORMAT_TRIGGERS.search(question or ""))
+
+
+def _strip_to_format(question: str, candidate: str, cheap_model) -> str:
+    """Re-emit candidate trimmed to satisfy a stated output-format constraint.
+    Returns the original candidate on any failure."""
+    try:
+        prompt = (
+            "You are a strict format-extraction engine, not a chatbot. "
+            "Input: a benchmark question and a candidate answer. "
+            "Output: the candidate rewritten to satisfy the question's output-format constraint EXACTLY. "
+            "Rules:\n"
+            "- 'first name' / 'given name' => output ONE word (the given name only, drop surname).\n"
+            "- 'surname' / 'last name' => output ONE word (the surname only, drop given name).\n"
+            "- 'single word' / 'one word' => output ONE word, no punctuation, no quotes.\n"
+            "- 'number' / 'numeric' / 'digits only' / 'integer' => output digits only, no units, no commas, "
+            "unless the question explicitly asks for units.\n"
+            "- 'comma-separated' / 'comma-delimited' / 'alphabetized list' => output items joined by ', ' "
+            "with no prose, no leading/trailing punctuation.\n"
+            "- Strip leading prose: 'The answer is', 'He said', character/speaker names, quotation marks, "
+            "trailing periods unless the answer is a sentence.\n"
+            "- Preserve the candidate's facts; only adjust formatting/trimming. Do NOT change which entity "
+            "or value is named.\n"
+            "Output: the rewritten answer ONLY. No labels, no explanation, no quotes."
+        )
+        try:
+            invoker = cheap_model.bind(temperature=0)
+        except Exception:
+            invoker = cheap_model
+        resp = invoker.invoke([
+            SystemMessage(content=prompt),
+            HumanMessage(content=f"Question: {question}\nCandidate: {candidate}"),
+        ])
+        text = _message_text(getattr(resp, "content", "")).strip()
+        text = text.strip("\"' \n\t")
+        if text and not _is_placeholder_answer(text):
+            return text
+    except Exception as exc:
+        log.warning("[supervisor_finalizer] format strip failed: %s", exc)
+    return candidate
+
+
 def _parse_supervisor_decision(content) -> dict:
     text = _message_text(content).strip()
     try:
@@ -634,10 +689,18 @@ def build_react_agent(cfg: Config):
             "search for `\"<video id>\" transcript`, `\"<video id>\"`, the exact video title, and distinctive quoted dialogue "
             "or on-screen phrases. Use search snippets, cached transcripts in Hugging Face Spaces/datasets, and reliable web "
             "pages as evidence. For visual questions, try `youtube_frame_at` only when a timestamp is needed; if video download "
-            "is blocked, pivot to title/time/object searches and answer from the strongest available evidence."
-            "directory to see what's actually there. User filename references may be casual or imprecise (e.g. `.lol` in chat is often laughter, not an extension).\n"
-            "9. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
-            "10. FINAL ANSWER FORMAT: When you have the final answer, output ONLY the value itself. Do not say 'The answer is...', do not provide explanations in your final output. Just output the bare minimum exact string, number, or list."
+            "is blocked, pivot to title/time/object searches and answer from the strongest available evidence.\n"
+            "9. FORMAT COMPLIANCE (BENCHMARK MODE): Before you emit 'Final Answer:', reread the question's last "
+            "sentence verbatim and treat it as a hard contract. You are a data-extraction engine, not a chatbot. "
+            "If the question says 'first name', output ONE word — the given name only. If it says 'surname' or "
+            "'last name', output ONE word — the family name only. If it says 'single word' or 'one word', output "
+            "ONE word with no punctuation, no quotes, no speaker prefix. If it says 'comma-separated' or "
+            "'alphabetized list', output items joined by ', ' with no prose. If it asks for a number, output "
+            "digits only — no units, no commas — unless units are explicitly requested. Strip ALL leading prose "
+            "(e.g. 'The answer is', 'He said', character names, quotation marks). Constraint compliance beats "
+            "completeness: an over-long answer is wrong, not safer."
+            "10. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
+            "11. FINAL ANSWER FORMAT: When you have the final answer, output ONLY the value itself. Do not say 'The answer is...', do not provide explanations in your final output. Just output the bare minimum exact string, number, or list."
         )
         
         if memory_context:
@@ -735,7 +798,29 @@ def build_react_agent(cfg: Config):
         )
         compacted = _compact_old_tool_messages(state["messages"], summarize_fn=summarize_fn)
         response = base_model.invoke([SystemMessage(sys_prompt)] + compacted)
-        print(f"[fail_safe] produced content={_message_text(getattr(response, 'content', ''))[:240]!r}", flush=True)
+        content_text = _message_text(getattr(response, "content", "")).strip()
+
+        if not content_text or "final answer" not in content_text.lower():
+            best_answer = str(state.get("supervisor_best_answer", "") or "").strip()
+            if best_answer and not _is_placeholder_answer(best_answer):
+                response = AIMessage(content=f"Final Answer: {best_answer}")
+                content_text = response.content
+                print(
+                    f"[fail_safe] empty/missing-final-answer; using supervisor_best_answer={best_answer[:160]!r}",
+                    flush=True,
+                )
+            else:
+                fallback = (
+                    "Final Answer: I cannot determine the answer from the available evidence."
+                )
+                response = AIMessage(content=fallback)
+                content_text = fallback
+                print(
+                    "[fail_safe] empty/missing-final-answer; no supervisor_best_answer; using descriptive default",
+                    flush=True,
+                )
+
+        print(f"[fail_safe] produced content={content_text[:240]!r}", flush=True)
         return {"messages": [response]}
 
     def supervisor_node(state):
@@ -809,6 +894,19 @@ def build_react_agent(cfg: Config):
     def supervisor_finalizer_node(state):
         best_answer = str(state.get("supervisor_best_answer", "") or "").strip()
         if best_answer and not _is_placeholder_answer(best_answer):
+            original_question = _initial_question_from_state(state)
+            if _needs_format_strip(original_question):
+                try:
+                    cheap = get_cheap_model(cfg)
+                    stripped = _strip_to_format(original_question, best_answer, cheap)
+                    if stripped and stripped != best_answer:
+                        print(
+                            f"[supervisor_finalizer] format-strip {best_answer[:80]!r} -> {stripped[:80]!r}",
+                            flush=True,
+                        )
+                        best_answer = stripped
+                except Exception as exc:
+                    log.warning("[supervisor_finalizer] format strip skipped: %s", exc)
             print(f"[supervisor_finalizer] finalizing best={best_answer[:160]!r}", flush=True)
             return {"messages": [AIMessage(content=f"Final Answer: {best_answer}")]}
         guidance = str(state.get("supervisor_guidance", "") or "").strip()
@@ -958,7 +1056,7 @@ def build_react_agent(cfg: Config):
         _route_after_review,
         {"model": "model", "extract_memory": "extract_memory"},
     )
-    graph.add_edge("supervisor_finalizer", "extract_memory")
+    graph.add_edge("supervisor_finalizer", "supervisor_review")
     graph.add_edge("fail_safe", "extract_memory")
     graph.add_edge("extract_memory", END)
 

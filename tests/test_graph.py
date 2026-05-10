@@ -596,6 +596,175 @@ def test_final_answer_gets_supervisor_review_and_can_be_returned_for_revision(mo
     assert all("wrong answer" != getattr(m, "content", "") for m in result["messages"][-1:])
 
 
+def test_fail_safe_falls_back_to_supervisor_best_answer_when_empty(monkeypatch, tmp_path):
+    """fail_safe model returning empty content must not propagate; supervisor_best_answer wins."""
+
+    class FakeBoundModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return _ai_with_calls([
+                {
+                    "id": f"call-{self.calls}",
+                    "name": "echo_tool",
+                    "args": {"text": str(self.calls)},
+                }
+            ])
+
+    class FakeStrongModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+            self.fail_safe_calls = 0
+            self.supervisor_calls = 0
+
+        def bind_tools(self, tools):
+            return self.bound
+
+        def invoke(self, messages):
+            prompt = str(messages[0].content)
+            if "EMERGENCY OVERRIDE" in prompt:
+                self.fail_safe_calls += 1
+                return AIMessage(content="")
+            self.supervisor_calls += 1
+            return AIMessage(content='{"status":"nudge","best_answer":"backtick","guidance":"Stop and answer backtick."}')
+
+    strong = FakeStrongModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 4
+    cfg.budget_hard_cap = 2
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="Question")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "fail-safe-best-answer-test"}},
+    )
+
+    last = result["messages"][-1]
+    assert last.content
+    assert "Final Answer:" in last.content
+    assert "backtick" in last.content
+
+
+def test_fail_safe_never_returns_empty_answer_without_best_answer(monkeypatch, tmp_path):
+    """No supervisor_best_answer, fail_safe model empty: still produce non-empty descriptive Final Answer."""
+
+    class FakeBoundModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return _ai_with_calls([
+                {
+                    "id": f"call-{self.calls}",
+                    "name": "echo_tool",
+                    "args": {"text": str(self.calls)},
+                }
+            ])
+
+    class FakeStrongModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+
+        def bind_tools(self, tools):
+            return self.bound
+
+        def invoke(self, messages):
+            return AIMessage(content="")
+
+    strong = FakeStrongModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 4
+    cfg.budget_hard_cap = 2
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 99, raising=False)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="Question")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "fail-safe-default-answer-test"}},
+    )
+
+    last = result["messages"][-1]
+    content = str(getattr(last, "content", ""))
+    assert content.strip(), "fail_safe must never propagate an empty answer"
+    assert "Final Answer:" in content
+
+
+def test_supervisor_review_auto_approves_after_fail_safe(monkeypatch, tmp_path):
+    """fail_safe -> supervisor_review must auto-approve (no infinite loop back to model)."""
+
+    class FakeBoundModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return _ai_with_calls([
+                {
+                    "id": f"call-{self.calls}",
+                    "name": "echo_tool",
+                    "args": {"text": str(self.calls)},
+                }
+            ])
+
+    class FakeStrongModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+            self.review_calls = 0
+
+        def bind_tools(self, tools):
+            return self.bound
+
+        def invoke(self, messages):
+            prompt = str(messages[0].content)
+            if "EMERGENCY OVERRIDE" in prompt:
+                return AIMessage(content="Final Answer: best effort")
+            if "FINAL ANSWER REVIEW" in prompt:
+                self.review_calls += 1
+                return AIMessage(content='{"status":"nudge","best_answer":"","guidance":"reject"}')
+            return AIMessage(content='{"status":"continue","best_answer":"","guidance":""}')
+
+    strong = FakeStrongModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 4
+    cfg.budget_hard_cap = 2
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 99, raising=False)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="Question")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "fail-safe-review-no-loop-test"}},
+    )
+
+    last = result["messages"][-1]
+    assert "Final Answer: best effort" in str(getattr(last, "content", ""))
+    assert strong.review_calls == 0
+
+
 def test_tool_node_invokes_tool_successfully():
     node = _build_tool_node([echo_tool])
     state = {"messages": [
