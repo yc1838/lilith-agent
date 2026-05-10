@@ -279,6 +279,62 @@ def test_supervisor_nudges_agent_to_answer_when_evidence_is_enough(monkeypatch, 
     assert strong.bound.calls == 2
 
 
+def test_supervisor_uses_extra_strong_model_not_cheap_model(monkeypatch, tmp_path):
+    class FakeBoundModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            if any("SUPERVISOR" in str(getattr(m, "content", "")) for m in messages):
+                return AIMessage(content="Final Answer: backtick")
+            return _ai_with_calls([
+                {
+                    "id": f"call-{self.calls}",
+                    "name": "echo_tool",
+                    "args": {"text": "evidence"},
+                }
+            ])
+
+    class FakeExtraStrongModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+            self.supervisor_calls = 0
+
+        def bind_tools(self, tools):
+            return self.bound
+
+        def invoke(self, messages):
+            self.supervisor_calls += 1
+            return AIMessage(content='{"status":"nudge","best_answer":"backtick","guidance":"Stop and answer backtick."}')
+
+    strong = FakeExtraStrongModel()
+
+    def cheap_should_not_be_used(cfg):
+        raise AssertionError("supervisor should use extra strong model, not cheap model")
+
+    cfg = Config.from_env()
+    cfg.recursion_limit = 10
+    cfg.budget_hard_cap = 99
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", cheap_should_not_be_used)
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="Unlambda question")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "supervisor-extra-strong-test"}},
+    )
+
+    assert result["messages"][-1].content == "Final Answer: backtick"
+    assert strong.supervisor_calls == 1
+
+
 def test_supervisor_finalizer_prompt_reinforces_original_question_contract(monkeypatch, tmp_path):
     class FakeBoundModel:
         def invoke(self, messages):

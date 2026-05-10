@@ -535,10 +535,10 @@ def build_react_agent(cfg: Config):
     base_model = get_extra_strong_model(cfg)
     model = base_model.bind_tools(tools)
     try:
-        supervisor_model = get_cheap_model(cfg)
+        supervisor_model = get_extra_strong_model(cfg)
     except Exception as exc:
-        log.warning("[supervisor] cheap model unavailable; disabled: %s", exc)
-        supervisor_model = None
+        log.warning("[supervisor] extra strong model unavailable; disabled: %s", exc)
+        supervisor_model = get_cheap_model(cfg)
     summarize_fn = _make_tool_result_summarizer(cfg) if cfg.compact_summarize else None
 
     def _initial_question_from_state(state) -> str:
