@@ -15,6 +15,9 @@ hf_oauth_expiration_minutes: 480
 
 🦋 A ReAct research assistant built on LangGraph. Lilith plans, calls tools, and answers open-ended research questions from a TUI or a batch runner over the GAIA benchmark.
 
+Currently 85% on gaig level 1 benchmark: https://huggingface.co/spaces/agents-course/Students_leaderboard
+
+
 ## Features
 
 - **Explicit ReAct graph** — tool-call dedup, per-tool error feedback, recursion cap, iteration fail-safe
