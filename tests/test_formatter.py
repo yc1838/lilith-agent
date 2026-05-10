@@ -205,6 +205,10 @@ def test_llm_formatter_disabled_still_applies_deterministic_strip():
         ("56,000", "56000"),
         ("3.1.3.1;1.11.1.7", "3.1.3.1; 1.11.1.7"),
         ("Final Answer: **47**", "47"),
+        ("Right.", "Right"),
+        ("Paris!", "Paris"),
+        ("Tokyo.", "Tokyo"),
+        ("Final Answer: Right.", "Right"),
     ],
 )
 def test_gaia_submission_normalizer_fixes_safe_formatting_artifacts(answer: str, expected: str):
@@ -218,6 +222,12 @@ def test_gaia_submission_normalizer_fixes_safe_formatting_artifacts(answer: str,
     [
         "U.S.",
         "Mr.",
+        "Mrs.",
+        "Dr.",
+        "St.",
+        "Inc.",
+        "Ltd.",
+        "Etc.",
         "Paris, France",
         "1,234.56",
         "C**H",

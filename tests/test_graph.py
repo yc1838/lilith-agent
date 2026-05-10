@@ -100,7 +100,8 @@ def test_model_prompt_includes_youtube_fallback_strategy(monkeypatch, tmp_path):
             return self
 
         def invoke(self, messages):
-            self.system_prompt = str(messages[0].content)
+            if not self.system_prompt:
+                self.system_prompt = str(messages[0].content)
             return AIMessage(content="Final Answer: inspected")
 
     fake_model = FakeModel()
@@ -617,6 +618,12 @@ def test_supervisor_finalizes_when_agent_ignores_prior_nudge(monkeypatch, tmp_pa
 
         def invoke(self, messages):
             self.calls += 1
+            sup_count = sum(
+                1 for m in messages
+                if "SUPERVISOR:" in str(getattr(m, "content", ""))
+            )
+            if sup_count >= 2:
+                return AIMessage(content="Final Answer: backtick")
             return _ai_with_calls([
                 {
                     "id": f"call-{self.calls}",
@@ -658,7 +665,7 @@ def test_supervisor_finalizes_when_agent_ignores_prior_nudge(monkeypatch, tmp_pa
 
     assert result["messages"][-1].content == "Final Answer: backtick"
     assert strong.supervisor_calls == 2
-    assert strong.bound.calls == 2
+    assert strong.bound.calls == 3
 
 
 def test_supervisor_overhead_leaves_room_for_hard_cap_fail_safe(monkeypatch, tmp_path):

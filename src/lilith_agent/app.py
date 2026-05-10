@@ -23,6 +23,7 @@ class AgentState(TypedDict):
     supervisor_decision: str
     supervisor_best_answer: str
     supervisor_guidance: str
+    supervisor_review_count: int
 
 
 from lilith_agent.config import Config
@@ -77,6 +78,7 @@ _DEFAULT_COOLDOWN_LIMIT = 3
 _FAIL_SAFE_RECURSION_HEADROOM = 4
 _SUPERVISOR_MIN_TOOL_CALLS = 5
 _SUPERVISOR_RECENT_MESSAGES = 12
+_SUPERVISOR_REVIEW_MAX = 3
 
 
 _RESPONSE_METADATA_NOISE_KEYS = frozenset({
@@ -325,7 +327,9 @@ def _route_after_model(
 
     Returns "fail_safe" when the per-question tool-call budget is exhausted or when
     iterations are within two of the LangGraph recursion limit; "tools" when the last
-    AIMessage has tool_calls; otherwise END.
+    AIMessage has tool_calls; "supervisor_review" when the last AIMessage carries a
+    'Final Answer:' candidate that has not been pre-approved by the supervisor;
+    otherwise END.
     """
     if state.get("iterations", 0) >= recursion_limit - 2:
         print(
@@ -343,7 +347,16 @@ def _route_after_model(
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
         return "tools"
+    if isinstance(last, AIMessage) and _has_final_answer(getattr(last, "content", "")):
+        return "supervisor_review"
     return "extract_memory"
+
+
+_FINAL_ANSWER_RE = re.compile(r"(?i)\bfinal\s+answer\s*:")
+
+
+def _has_final_answer(content) -> bool:
+    return bool(_FINAL_ANSWER_RE.search(_message_text(content)))
 
 
 def _build_tool_node(
@@ -761,8 +774,6 @@ def build_react_agent(cfg: Config):
         if _is_placeholder_answer(best_answer):
             print(f"[supervisor] discarded placeholder best_answer={best_answer[:80]!r}", flush=True)
             best_answer = ""
-        if status == "nudge" and state.get("supervisor_nudges", 0) > 0 and best_answer:
-            status = "finalize"
         if status == "finalize" and state.get("supervisor_nudges", 0) > 0 and not best_answer:
             status = "nudge"
         log.info(
@@ -817,6 +828,75 @@ def build_react_agent(cfg: Config):
         print(f"[supervisor_finalizer] produced content={_message_text(getattr(response, 'content', ''))[:240]!r}", flush=True)
         return {"messages": [response]}
 
+    def supervisor_review_node(state):
+        review_count = state.get("supervisor_review_count", 0)
+        prior_supervisor = state.get("supervisor_decision") or ""
+        if supervisor_model is None or review_count >= _SUPERVISOR_REVIEW_MAX:
+            print(
+                f"[supervisor_review] auto-approve review_count={review_count} "
+                f"reason={'no_model' if supervisor_model is None else 'cap'}",
+                flush=True,
+            )
+            return {"supervisor_review_count": review_count + 1}
+        if prior_supervisor in {"nudge", "finalize"}:
+            print(
+                f"[supervisor_review] skip reason=supervisor_recent_decision={prior_supervisor}",
+                flush=True,
+            )
+            return {"supervisor_review_count": review_count + 1}
+
+        last = state["messages"][-1]
+        candidate = _message_text(getattr(last, "content", ""))[:1200]
+
+        recent_messages = state["messages"][-_SUPERVISOR_RECENT_MESSAGES:]
+        rendered = []
+        for msg in recent_messages:
+            name = getattr(msg, "name", "") or msg.__class__.__name__
+            rendered.append(f"{name}: {_message_text(getattr(msg, 'content', ''))[:1200]}")
+
+        prompt = (
+            "FINAL ANSWER REVIEW. The agent has produced a candidate Final Answer for a benchmark "
+            "question. Decide whether to approve it as-is or send it back for revision. "
+            "Return ONLY JSON with keys status, best_answer, guidance. "
+            "status must be 'finalize' (approve) or 'nudge' (reject and request revision). "
+            "Reject only when the candidate has a concrete defect: violates a stated constraint, "
+            "is a placeholder (unknown, n/a, none, not sure), uses the wrong format, or contradicts "
+            "evidence in the transcript. Otherwise approve. Never put placeholder values in best_answer. "
+            f"Candidate Final Answer: {candidate}"
+        )
+        response = supervisor_model.invoke([
+            SystemMessage(content=prompt),
+            HumanMessage(content="\n\n".join(rendered)),
+        ])
+        decision = _parse_supervisor_decision(getattr(response, "content", ""))
+        status = decision["status"]
+        guidance = decision.get("guidance", "")
+        best_answer = decision.get("best_answer", "")
+        if _is_placeholder_answer(best_answer):
+            best_answer = ""
+
+        print(
+            f"[supervisor_review] status={status} count={review_count + 1} "
+            f"guidance={guidance[:160]!r}",
+            flush=True,
+        )
+
+        if status != "nudge":
+            return {"supervisor_review_count": review_count + 1}
+
+        revision_msg = SystemMessage(content=(
+            "FINAL ANSWER REVIEW FAILED: The previous Final Answer was rejected by the supervisor. "
+            f"Reason: {guidance or 'No specific guidance provided.'} "
+            + (f"Stronger candidate: {best_answer}. " if best_answer else "")
+            + "Re-examine the question and the evidence in this transcript and produce a corrected "
+            "Final Answer. If you need more evidence, call tools; otherwise output the corrected "
+            "Final Answer directly."
+        ))
+        return {
+            "supervisor_review_count": review_count + 1,
+            "messages": [revision_msg],
+        }
+
     def extract_memory_node(state):
         from lilith_agent.memory import extract_and_compress_facts, MIN_MESSAGES_FOR_EXTRACTION
         messages = state["messages"]
@@ -837,6 +917,7 @@ def build_react_agent(cfg: Config):
     graph.add_node("tools", tool_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("supervisor_finalizer", supervisor_finalizer_node)
+    graph.add_node("supervisor_review", supervisor_review_node)
     graph.add_node("fail_safe", fail_safe_node)
     graph.add_node("extract_memory", extract_memory_node)
 
@@ -847,13 +928,35 @@ def build_react_agent(cfg: Config):
             budget_hard_cap=cfg.budget_hard_cap,
         )
 
+    def _route_after_review(state) -> str:
+        last = state["messages"][-1]
+        if isinstance(last, SystemMessage) and "FINAL ANSWER REVIEW FAILED" in _message_text(
+            getattr(last, "content", "")
+        ):
+            return "model"
+        return "extract_memory"
+
     graph.set_entry_point("model")
-    graph.add_conditional_edges("model", _router, {"tools": "tools", "fail_safe": "fail_safe", "extract_memory": "extract_memory"})
+    graph.add_conditional_edges(
+        "model",
+        _router,
+        {
+            "tools": "tools",
+            "fail_safe": "fail_safe",
+            "supervisor_review": "supervisor_review",
+            "extract_memory": "extract_memory",
+        },
+    )
     graph.add_edge("tools", "supervisor")
     graph.add_conditional_edges(
         "supervisor",
         lambda state: "supervisor_finalizer" if state.get("supervisor_decision") == "finalize" else "model",
         {"model": "model", "supervisor_finalizer": "supervisor_finalizer"},
+    )
+    graph.add_conditional_edges(
+        "supervisor_review",
+        _route_after_review,
+        {"model": "model", "extract_memory": "extract_memory"},
     )
     graph.add_edge("supervisor_finalizer", "extract_memory")
     graph.add_edge("fail_safe", "extract_memory")
