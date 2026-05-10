@@ -428,6 +428,66 @@ def test_supervisor_finalizer_rejects_unknown_best_answer_and_forces_best_guess(
     assert strong.finalizer_calls == 1
 
 
+def test_supervisor_does_not_finalize_placeholder_after_prior_nudge(monkeypatch, tmp_path):
+    class FakeBoundModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            if self.calls >= 3 and any("SUPERVISOR" in str(getattr(m, "content", "")) for m in messages):
+                return AIMessage(content="Final Answer: recovered guess")
+            return _ai_with_calls([
+                {
+                    "id": f"call-{self.calls}",
+                    "name": "echo_tool",
+                    "args": {"text": "partial evidence"},
+                }
+            ])
+
+    class FakeStrongModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+            self.supervisor_calls = 0
+            self.finalizer_calls = 0
+
+        def bind_tools(self, tools):
+            return self.bound
+
+        def invoke(self, messages):
+            prompt = str(messages[0].content)
+            if "SUPERVISOR FINALIZER" in prompt:
+                self.finalizer_calls += 1
+                return AIMessage(content="Final Answer: premature finalizer")
+            self.supervisor_calls += 1
+            if self.supervisor_calls == 1:
+                return AIMessage(content='{"status":"nudge","best_answer":"","guidance":"Use the evidence to make a best guess."}')
+            return AIMessage(content='{"status":"finalize","best_answer":"Unknown","guidance":"You were already nudged. Provide your final answer based on the best available information."}')
+
+    strong = FakeStrongModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 12
+    cfg.budget_hard_cap = 99
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="Question requiring a concrete answer")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "supervisor-placeholder-after-nudge-test"}},
+    )
+
+    assert result["messages"][-1].content == "Final Answer: recovered guess"
+    assert strong.finalizer_calls == 0
+    assert strong.supervisor_calls == 2
+
+
 def test_supervisor_finalizes_when_agent_ignores_prior_nudge(monkeypatch, tmp_path):
     class FakeBoundModel:
         def __init__(self):

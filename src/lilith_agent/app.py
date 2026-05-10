@@ -740,10 +740,11 @@ def build_react_agent(cfg: Config):
             "already has enough evidence to answer or is repeating low-value tool work. "
             "Return ONLY JSON with keys status, best_answer, guidance. "
             "status must be continue, nudge, or finalize. Use nudge when evidence likely supports "
-            "an answer but one more agent turn is acceptable. Use finalize when the agent was already "
-            "nudged or the evidence is conclusive. Never put placeholder values like unknown, n/a, "
-            "none, or not sure in best_answer. If no concrete submit-ready answer is available, set "
-            "best_answer to an empty string and use guidance to force the agent to make its best guess."
+            "an answer but one more agent turn is acceptable. Use finalize only when a concrete "
+            "submit-ready answer is available or the evidence is conclusive. A prior nudge alone is "
+            "not a reason to finalize. Never put placeholder values like unknown, n/a, none, or not "
+            "sure in best_answer. If no concrete submit-ready answer is available, set best_answer "
+            "to an empty string and use guidance to force the agent to make its best guess."
         )
         response = supervisor_model.invoke([
             SystemMessage(content=prompt),
@@ -756,8 +757,10 @@ def build_react_agent(cfg: Config):
         if _is_placeholder_answer(best_answer):
             print(f"[supervisor] discarded placeholder best_answer={best_answer[:80]!r}", flush=True)
             best_answer = ""
-        if status == "nudge" and state.get("supervisor_nudges", 0) > 0:
+        if status == "nudge" and state.get("supervisor_nudges", 0) > 0 and best_answer:
             status = "finalize"
+        if status == "finalize" and state.get("supervisor_nudges", 0) > 0 and not best_answer:
+            status = "nudge"
         log.info(
             "[supervisor] status=%s best=%r guidance=%r",
             status,
