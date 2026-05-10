@@ -116,6 +116,27 @@ def _message_text(content) -> str:
     return str(content or "")
 
 
+_PLACEHOLDER_ANSWERS = frozenset({
+    "unknown",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "not sure",
+    "unsure",
+    "undetermined",
+    "cannot determine",
+    "can't determine",
+    "i don't know",
+    "no answer",
+})
+
+
+def _is_placeholder_answer(answer: str) -> bool:
+    normalized = re.sub(r"[\s\W_]+", " ", str(answer or "").strip().lower()).strip()
+    return normalized in _PLACEHOLDER_ANSWERS
+
+
 def _parse_supervisor_decision(content) -> dict:
     text = _message_text(content).strip()
     try:
@@ -534,11 +555,7 @@ def build_react_agent(cfg: Config):
 
     base_model = get_extra_strong_model(cfg)
     model = base_model.bind_tools(tools)
-    try:
-        supervisor_model = get_extra_strong_model(cfg)
-    except Exception as exc:
-        log.warning("[supervisor] extra strong model unavailable; disabled: %s", exc)
-        supervisor_model = get_cheap_model(cfg)
+    supervisor_model = base_model
     summarize_fn = _make_tool_result_summarizer(cfg) if cfg.compact_summarize else None
 
     def _initial_question_from_state(state) -> str:
@@ -719,12 +736,14 @@ def build_react_agent(cfg: Config):
             name = getattr(msg, "name", "") or msg.__class__.__name__
             rendered.append(f"{name}: {_message_text(getattr(msg, 'content', ''))[:1200]}")
         prompt = (
-            "You are a cheap supervisor for a benchmark ReAct agent. Decide whether the agent "
+            "You are a high-precision supervisor for a benchmark ReAct agent. Decide whether the agent "
             "already has enough evidence to answer or is repeating low-value tool work. "
             "Return ONLY JSON with keys status, best_answer, guidance. "
             "status must be continue, nudge, or finalize. Use nudge when evidence likely supports "
             "an answer but one more agent turn is acceptable. Use finalize when the agent was already "
-            "nudged or the evidence is conclusive."
+            "nudged or the evidence is conclusive. Never put placeholder values like unknown, n/a, "
+            "none, or not sure in best_answer. If no concrete submit-ready answer is available, set "
+            "best_answer to an empty string and use guidance to force the agent to make its best guess."
         )
         response = supervisor_model.invoke([
             SystemMessage(content=prompt),
@@ -734,6 +753,9 @@ def build_react_agent(cfg: Config):
         status = decision["status"]
         best_answer = decision.get("best_answer", "")
         guidance = decision.get("guidance", "")
+        if _is_placeholder_answer(best_answer):
+            print(f"[supervisor] discarded placeholder best_answer={best_answer[:80]!r}", flush=True)
+            best_answer = ""
         if status == "nudge" and state.get("supervisor_nudges", 0) > 0:
             status = "finalize"
         log.info(
@@ -753,9 +775,14 @@ def build_react_agent(cfg: Config):
         }
         if status == "nudge":
             update["supervisor_nudges"] = state.get("supervisor_nudges", 0) + 1
+            best_answer_clause = (
+                f"Best current answer: {best_answer}. "
+                if best_answer
+                else "No concrete best answer was identified yet. Make the strongest best guess from existing evidence. "
+            )
             update["messages"] = [SystemMessage(content=(
                 "SUPERVISOR: Evidence suggests you may already be able to answer. "
-                f"Best current answer: {best_answer or 'unknown'}. "
+                f"{best_answer_clause}"
                 f"Guidance: {guidance or 'Stop exploring unless a specific missing fact remains.'} "
                 "If no specific missing fact remains, provide Final Answer now."
             ))]
@@ -763,7 +790,7 @@ def build_react_agent(cfg: Config):
 
     def supervisor_finalizer_node(state):
         best_answer = str(state.get("supervisor_best_answer", "") or "").strip()
-        if best_answer:
+        if best_answer and not _is_placeholder_answer(best_answer):
             print(f"[supervisor_finalizer] finalizing best={best_answer[:160]!r}", flush=True)
             return {"messages": [AIMessage(content=f"Final Answer: {best_answer}")]}
         guidance = str(state.get("supervisor_guidance", "") or "").strip()
@@ -773,6 +800,8 @@ def build_react_agent(cfg: Config):
             SystemMessage(content=(
                 "SUPERVISOR FINALIZER: Stop tool use. Answer the original question, not an intermediate hop. "
                 "Produce a bare final answer in 'Final Answer: ...' form using the existing evidence. "
+                "Do not answer unknown, n/a, none, or not sure. If evidence is imperfect, make the strongest "
+                "best guess supported by the transcript, search snippets, tool outputs, and prior reasoning. "
                 f"Original question: {original_question}\n"
                 f"Supervisor guidance: {guidance}"
             )),
