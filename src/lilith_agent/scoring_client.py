@@ -126,7 +126,7 @@ class ScoringApiClient:
             token = os.getenv("HF_TOKEN") or os.getenv("GAIA_HUGGINGFACE_API_KEY")
             self._dataset_client = GaiaDatasetClient(
                 config=os.getenv("GAIA_DATASET_CONFIG", "2023_all"),
-                split=os.getenv("GAIA_DATASET_SPLIT", "test"),
+                split=os.getenv("GAIA_DATASET_SPLIT", "validation"),
                 level=None,
                 token=token,
             )

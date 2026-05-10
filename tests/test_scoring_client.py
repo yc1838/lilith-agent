@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -175,6 +176,24 @@ class ScoringApiClientTests(unittest.TestCase):
             client.get_questions()
 
         getter.assert_called_once_with()
+
+    def test_default_dataset_client_uses_validation_split(self) -> None:
+        dataset_instance = Mock()
+
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "lilith_agent.gaia_dataset.GaiaDatasetClient",
+            return_value=dataset_instance,
+        ) as dataset_client:
+            client = ScoringApiClient(api_url="https://example.com", session=Mock())
+            payload = client._get_dataset_client()
+
+        self.assertIs(payload, dataset_instance)
+        dataset_client.assert_called_once_with(
+            config="2023_all",
+            split="validation",
+            level=None,
+            token=None,
+        )
 
 
 if __name__ == "__main__":
