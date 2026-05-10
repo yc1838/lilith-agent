@@ -53,6 +53,12 @@ def _preview_for_log(text: str, limit: int = MEMORY_LOG_PREVIEW_CHARS) -> str:
         return compact
     return compact[: limit - 1] + "…"
 
+
+def _print_memory_log(message: str, *args: Any) -> None:
+    text = message % args if args else message
+    print(text, flush=True)
+
+
 class MemoryStore:
     def __init__(self, db_path: Union[Path, str] = MEMORY_DB_PATH):
         self._in_memory = (str(db_path) == ":memory:")
@@ -113,6 +119,8 @@ class MemoryStore:
         if not memories:
             existing = self.get_all_memories()
             if existing and not allow_empty:
+                _print_memory_log("[memory] save_memories called with empty list while %d facts exist — refusing to wipe",
+                                  len(existing))
                 log.warning("[memory] save_memories called with empty list while %d facts exist — refusing to wipe",
                             len(existing))
                 return
@@ -212,6 +220,7 @@ def extract_and_compress_facts(messages: List[BaseMessage], model) -> None:
     """
     from langmem import create_memory_manager
     from langmem.knowledge.extraction import Memory
+    _print_memory_log("[memory] Running langmem memory management...")
     log.info("[memory] Running langmem memory management...")
     try:
         # 1. Get existing memories from our local store
@@ -270,18 +279,22 @@ def extract_and_compress_facts(messages: List[BaseMessage], model) -> None:
             
             if updated_facts or removed_ids:
                 _store.save_memories(updated_facts, allow_empty=bool(removed_ids))
-                log.info(f"[memory] langmem updated store to {len(updated_facts)} facts.")
+                _print_memory_log("[memory] langmem updated store to %d facts.", len(updated_facts))
+                log.info("[memory] langmem updated store to %d facts.", len(updated_facts))
             else:
+                _print_memory_log("[memory] langmem returned empty result — keeping existing facts")
                 log.info("[memory] langmem returned empty result — keeping existing facts")
         summarize_episode(messages, model)
 
-    except Exception:
+    except Exception as exc:
+        _print_memory_log("[memory] langmem extraction failed: %s: %s", type(exc).__name__, exc)
         log.exception("[memory] langmem extraction failed")
         # Fallback to summarize episode if manager fails
         summarize_episode(messages, model)
 
 def summarize_episode(messages: List[BaseMessage], model) -> None:
     """Summarizes the trajectory to help avoid future mistakes."""
+    _print_memory_log("[memory] Summarizing task episode...")
     log.info("[memory] Summarizing task episode...")
     try:
         initial_question = ""
@@ -315,13 +328,20 @@ Keep it under 150 words.
         response = model.invoke(prompt)
         summary = _content_to_text(response.content)
         _store.add_episode(initial_question, summary, outcome)
+        _print_memory_log(
+            "[memory] Episode saved: task=%r outcome=%r summary=%r",
+            _preview_for_log(initial_question),
+            outcome,
+            _preview_for_log(summary),
+        )
         log.info(
             "[memory] Episode saved: task=%r outcome=%r summary=%r",
             _preview_for_log(initial_question),
             outcome,
             _preview_for_log(summary),
         )
-    except Exception:
+    except Exception as exc:
+        _print_memory_log("[memory] Summarization failed: %s: %s", type(exc).__name__, exc)
         log.exception("[memory] Summarization failed")
 
 def _relevance_score(text: str, query_tokens: set) -> float:
@@ -377,7 +397,8 @@ def retrieve_relevant_context(query: str, char_budget: int = MEMORY_CONTEXT_CHAR
                 context_parts.append(ep_block)
 
         return "\n\n".join(context_parts)
-    except Exception:
+    except Exception as exc:
+        _print_memory_log("[memory] Retrieval failed: %s: %s", type(exc).__name__, exc)
         log.exception("[memory] Retrieval failed")
         return ""
 
@@ -412,6 +433,7 @@ def search_memory_store(query: str, max_results: int = 10) -> str:
         if not parts:
             return "No matching memories found."
         return "\n\n".join(parts)
-    except Exception:
+    except Exception as exc:
+        _print_memory_log("[memory] search_memory_store failed: %s: %s", type(exc).__name__, exc)
         log.exception("[memory] search_memory_store failed")
         return "Memory search failed."

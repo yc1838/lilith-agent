@@ -488,6 +488,128 @@ def test_supervisor_does_not_finalize_placeholder_after_prior_nudge(monkeypatch,
     assert strong.supervisor_calls == 2
 
 
+def test_supervisor_does_not_auto_finalize_concrete_best_answer_after_prior_nudge(monkeypatch, tmp_path):
+    class FakeBoundModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return _ai_with_calls([
+                {
+                    "id": f"call-{self.calls}",
+                    "name": "echo_tool",
+                    "args": {"text": "partial evidence"},
+                }
+            ])
+
+    class FakeStrongModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+            self.supervisor_calls = 0
+            self.finalizer_calls = 0
+
+        def bind_tools(self, tools):
+            return self.bound
+
+        def invoke(self, messages):
+            prompt = str(messages[0].content)
+            if "SUPERVISOR FINALIZER" in prompt:
+                self.finalizer_calls += 1
+                return AIMessage(content="Final Answer: should not happen")
+            self.supervisor_calls += 1
+            return AIMessage(content='{"status":"nudge","best_answer":"concrete candidate","guidance":"Check one more constraint before final answer."}')
+
+    strong = FakeStrongModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 10
+    cfg.budget_hard_cap = 99
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="Question requiring more checking")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "supervisor-no-auto-finalize-after-nudge-test"}},
+    )
+
+    assert strong.finalizer_calls == 0
+    assert strong.supervisor_calls > 1
+    assert result["supervisor_decision"] == "nudge"
+
+
+def test_final_answer_gets_supervisor_review_and_can_be_returned_for_revision(monkeypatch, tmp_path):
+    class FakeBoundModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            if any("FINAL ANSWER REVIEW FAILED" in str(getattr(m, "content", "")) for m in messages):
+                return AIMessage(content="Final Answer: corrected answer")
+            return AIMessage(content="Final Answer: wrong answer")
+
+    class FakeStrongModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+            self.review_calls = 0
+
+        def bind_tools(self, tools):
+            return self.bound
+
+        def invoke(self, messages):
+            prompt = str(messages[0].content)
+            if "FINAL ANSWER REVIEW" in prompt:
+                self.review_calls += 1
+                if self.review_calls == 1:
+                    return AIMessage(content='{"status":"nudge","best_answer":"","guidance":"The proposed answer violates a constraint; fix it."}')
+                return AIMessage(content='{"status":"finalize","best_answer":"corrected answer","guidance":"Approved."}')
+            return AIMessage(content='{"status":"continue","best_answer":"","guidance":""}')
+
+    strong = FakeStrongModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 10
+    cfg.budget_hard_cap = 99
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="Question with constraint")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "final-answer-review-revision-test"}},
+    )
+
+    assert strong.review_calls == 2
+    assert "Final Answer: corrected answer" in result["messages"][-1].content
+    assert all("wrong answer" != getattr(m, "content", "") for m in result["messages"][-1:])
+
+
+def test_tool_node_invokes_tool_successfully():
+    node = _build_tool_node([echo_tool])
+    state = {"messages": [
+        HumanMessage(content="say hi"),
+        _ai_with_calls([{"id": "1", "name": "echo_tool", "args": {"text": "hi"}}]),
+    ]}
+
+    out = node(state)
+    assert len(out["messages"]) == 1
+    msg = out["messages"][0]
+    assert isinstance(msg, ToolMessage)
+    assert msg.tool_call_id == "1"
+    assert "echoed: hi" in msg.content
+
+
 def test_supervisor_finalizes_when_agent_ignores_prior_nudge(monkeypatch, tmp_path):
     class FakeBoundModel:
         def __init__(self):
@@ -681,6 +803,26 @@ def test_tool_node_dedups_repeat_tool_call_without_invoking():
     assert isinstance(msg, ToolMessage)
     assert msg.tool_call_id == "new"
     assert "already called" in msg.content.lower()
+
+
+def test_tool_node_prints_semantic_dedup_queries(capsys):
+    node = _build_tool_node([echo_tool], semantic_dedup_threshold=0.5)
+    prior_call = {"id": "old", "name": "web_search", "args": {"query": "apollo moon landing transcript"}}
+    new_call = {"id": "new", "name": "web_search", "args": {"query": "moon landing apollo transcript"}}
+    state = {"messages": [
+        HumanMessage(content="go"),
+        _ai_with_calls([prior_call]),
+        ToolMessage(tool_call_id="old", name="web_search", content="done"),
+        _ai_with_calls([new_call]),
+    ]}
+
+    out = node(state)
+
+    printed = capsys.readouterr().out
+    assert "[tools] semantic_dedup score=1.00 tool=web_search" in printed
+    assert "query='moon landing apollo transcript'" in printed
+    assert "prior_query='apollo moon landing transcript'" in printed
+    assert "REDUNDANT SEARCH PATH" in out["messages"][0].content
 
 
 def test_tool_node_handles_unknown_tool_name():

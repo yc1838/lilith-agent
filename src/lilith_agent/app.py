@@ -426,7 +426,11 @@ def _build_tool_node(
                         if score > best_score:
                             best_prior, best_score = prior_q, score
                     if best_score >= semantic_dedup_threshold:
-                        print(f"[tools] semantic_dedup score={best_score:.2f} tool={name}", flush=True)
+                        print(
+                            f"[tools] semantic_dedup score={best_score:.2f} tool={name} "
+                            f"query={q!r} prior_query={best_prior!r}",
+                            flush=True,
+                        )
                         log.info("[semantic_dedup] %.2f match vs prior: %r ~ %r", best_score, q, best_prior)
                         results.append(ToolMessage(
                             tool_call_id=tc_id,
