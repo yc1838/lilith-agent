@@ -91,6 +91,40 @@ def test_build_react_agent_prints_effective_recursion_limit(monkeypatch, tmp_pat
     assert "[graph] effective_recursion_limit=79 logical_recursion_limit=50 budget_hard_cap=25 headroom=4" in captured
 
 
+def test_model_prompt_includes_youtube_fallback_strategy(monkeypatch, tmp_path):
+    class FakeModel:
+        def __init__(self):
+            self.system_prompt = ""
+
+        def bind_tools(self, tools):
+            return self
+
+        def invoke(self, messages):
+            self.system_prompt = str(messages[0].content)
+            return AIMessage(content="Final Answer: inspected")
+
+    fake_model = FakeModel()
+    cfg = Config.from_env()
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: fake_model)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: fake_model)
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    graph.invoke(
+        {"messages": [HumanMessage(content="What happens in https://www.youtube.com/watch?v=abcdefghijk?")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "youtube-fallback-prompt-test"}},
+    )
+
+    prompt = fake_model.system_prompt.lower()
+    assert "youtube fallback strategy" in prompt
+    assert "video id" in prompt
+    assert "transcript" in prompt
+    assert "do not repeatedly retry" in prompt
+
+
 def test_fail_safe_uses_unbound_model_to_prevent_more_tool_calls(monkeypatch, tmp_path):
     class FakeBoundModel:
         def __init__(self):

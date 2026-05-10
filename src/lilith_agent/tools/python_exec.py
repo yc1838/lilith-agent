@@ -27,9 +27,12 @@ import sys
 import tempfile
 import textwrap
 
+from lilith_agent.runtime_env import SAFE_THREAD_ENV
+
 _OUTPUT_CAP_CHARS = 200_000
 _DOCKER_IMAGE_DEFAULT = "lilith-pysandbox:latest"
 _DOCKER_STARTUP_HEADROOM_S = 5
+BLAS_THREAD_ENV_DEFAULTS = SAFE_THREAD_ENV
 
 # Env vars that are safe (or necessary) to forward. Everything else is dropped.
 _ENV_ALLOWLIST = frozenset({
@@ -46,6 +49,12 @@ _ENV_ALLOWLIST = frozenset({
     "PYTHONPATH",
     "PYTHONHOME",
     "PYTHONIOENCODING",
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "TOKENIZERS_PARALLELISM",
     # Proxy config is routinely needed for scraping; not a secret.
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -102,7 +111,9 @@ _RUNNER_SCRIPT = textwrap.dedent(
 
 def _scrubbed_env() -> dict[str, str]:
     """Return a fresh env dict containing only allowlisted keys from os.environ."""
-    return {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
+    env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
+    env.update(BLAS_THREAD_ENV_DEFAULTS)
+    return env
 
 
 def _truncate_output(text: str) -> str:

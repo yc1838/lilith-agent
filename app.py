@@ -3,12 +3,16 @@ import sys
 import traceback
 from pathlib import Path
 
+sys.path.append(str(Path(__file__).parent / "src"))
+
 from dotenv import load_dotenv
 
 env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path, override=True)
 
-sys.path.append(str(Path(__file__).parent / "src"))
+from lilith_agent.runtime_env import apply_safe_thread_env
+
+apply_safe_thread_env()
 
 import gradio as gr
 import pandas as pd

@@ -48,18 +48,51 @@ class ScoringApiClient:
             response = self.session.get(f"{self.api_url}/files/{task_id}", timeout=60)
             response.raise_for_status()
         except requests.RequestException as exc:
-            fallback = self._fallback_dataset_client_for(exc, action=f"download file for {task_id}")
+            fallback = self._fallback_dataset_client_for(
+                exc,
+                action=f"download file for {task_id}",
+                missing_is_fallback=True,
+            )
             if fallback is None:
+                print(
+                    f"[scoring] file download failed without fallback task={task_id} error={exc.__class__.__name__}",
+                    flush=True,
+                )
                 return None
-            return fallback.download_file(task_id, dest_dir)
+            path = fallback.download_file(task_id, dest_dir)
+            print(f"[scoring] fallback file result task={task_id} path={path}", flush=True)
+            return path
 
         filename = task_id
         cd = response.headers.get("content-disposition", "")
         if "filename=" in cd:
             filename = cd.split("filename=")[-1].strip().strip('"')
+        content_type = response.headers.get("content-type", "")
+        if self._is_invalid_file_payload(response.content, content_type):
+            print(
+                f"[scoring] invalid file payload task={task_id} status={response.status_code} "
+                f"bytes={len(response.content)} content_type={content_type!r}; trying dataset fallback",
+                flush=True,
+            )
+            try:
+                fallback = self._get_dataset_client()
+            except Exception as exc:
+                print(
+                    f"[scoring] dataset fallback unavailable task={task_id} type={type(exc).__name__} error={exc}",
+                    flush=True,
+                )
+                return None
+            path = fallback.download_file(task_id, dest_dir)
+            print(f"[scoring] fallback file result task={task_id} path={path}", flush=True)
+            return path
         out = dest_dir / filename
         out.write_bytes(response.content)
         self.last_warning = None
+        print(
+            f"[scoring] file downloaded task={task_id} path={out} bytes={len(response.content)} "
+            f"content_type={response.headers.get('content-type', '')!r}",
+            flush=True,
+        )
         return out
 
     def _fallback_dataset_client_for(
@@ -67,8 +100,9 @@ class ScoringApiClient:
         exc: requests.RequestException,
         *,
         action: str,
+        missing_is_fallback: bool = False,
     ) -> Any | None:
-        if not self._should_use_dataset_fallback(exc):
+        if not self._should_use_dataset_fallback(exc, missing_is_fallback=missing_is_fallback):
             return None
         try:
             dataset_client = self._get_dataset_client()
@@ -99,8 +133,14 @@ class ScoringApiClient:
         return self._dataset_client
 
     @staticmethod
-    def _should_use_dataset_fallback(exc: requests.RequestException) -> bool:
+    def _should_use_dataset_fallback(exc: requests.RequestException, *, missing_is_fallback: bool = False) -> bool:
         if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
             return True
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if missing_is_fallback and status_code == 404:
+            return True
         return status_code in {429, 502, 503, 504}
+
+    @staticmethod
+    def _is_invalid_file_payload(content: bytes, content_type: str) -> bool:
+        return "application/json" in content_type.lower() and len(content) < 4096

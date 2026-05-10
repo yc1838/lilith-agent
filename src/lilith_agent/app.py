@@ -595,8 +595,15 @@ def build_react_agent(cfg: Config):
             "If `find_files` returns 'No files found' for an exact filename, do NOT escalate to `find_files(root='/')` — "
             "broaden instead: `grep` for a substring, `find_files` with a shorter/partial name, or `ls` the parent "
             "directory to see what's actually there. User filename references may be casual or imprecise (e.g. `.lol` in chat is often laughter, not an extension).\n"
-            "8. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
-            "9. FINAL ANSWER FORMAT: When you have the final answer, output ONLY the value itself. Do not say 'The answer is...', do not provide explanations in your final output. Just output the bare minimum exact string, number, or list."
+            "8. YOUTUBE FALLBACK STRATEGY: First try `youtube_transcript` for spoken captions. If it is blocked, unavailable, "
+            "or says YouTube is blocking requests, do not repeatedly retry transcript or yt-dlp. Extract the video ID and "
+            "search for `\"<video id>\" transcript`, `\"<video id>\"`, the exact video title, and distinctive quoted dialogue "
+            "or on-screen phrases. Use search snippets, cached transcripts in Hugging Face Spaces/datasets, and reliable web "
+            "pages as evidence. For visual questions, try `youtube_frame_at` only when a timestamp is needed; if video download "
+            "is blocked, pivot to title/time/object searches and answer from the strongest available evidence."
+            "directory to see what's actually there. User filename references may be casual or imprecise (e.g. `.lol` in chat is often laughter, not an extension).\n"
+            "9. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
+            "10. FINAL ANSWER FORMAT: When you have the final answer, output ONLY the value itself. Do not say 'The answer is...', do not provide explanations in your final output. Just output the bare minimum exact string, number, or list."
         )
         
         if memory_context:

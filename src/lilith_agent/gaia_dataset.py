@@ -58,10 +58,18 @@ class GaiaDatasetClient:
         """Copy the dataset's local file_path into dest_dir."""
         row = next((r for r in self._rows if r["task_id"] == task_id), None)
         if row is None:
+            print(
+                f"[gaia_dataset] file row missing task={task_id} split={self.split} config={self.config}",
+                flush=True,
+            )
             return None
         
         file_name = row.get("file_name")
         if not file_name:
+            print(
+                f"[gaia_dataset] file_name missing task={task_id} split={self.split} config={self.config}",
+                flush=True,
+            )
             return None
 
         dest_root = Path(dest_dir)
@@ -69,16 +77,16 @@ class GaiaDatasetClient:
         dest = dest_root / file_name
 
         if dest.exists() and dest.stat().st_size > 300:
+             print(f"[gaia_dataset] file already exists task={task_id} path={dest}", flush=True)
              return dest
 
-        # 1. Try local data dir fallback
         level = row.get("Level", "1")
         local_data_path = Path("data") / f"gaia_level{level}" / "files" / task_id
         if local_data_path.exists() and local_data_path.stat().st_size > 300:
              shutil.copy(local_data_path, dest)
+             print(f"[gaia_dataset] copied local file task={task_id} source={local_data_path} dest={dest}", flush=True)
              return dest
 
-        # 2. Direct download
         year = "2023"
         if hasattr(self, "config") and "_" in self.config:
             year = self.config.split("_")[0]
@@ -96,8 +104,20 @@ class GaiaDatasetClient:
             if response.status_code == 200:
                 with open(dest, "wb") as f:
                     shutil.copyfileobj(response.raw, f)
+                print(f"[gaia_dataset] downloaded hf file task={task_id} path={dest} url={hf_url}", flush=True)
                 return dest
-        except Exception:
-            pass
+            print(
+                f"[gaia_dataset] hf download failed task={task_id} status={response.status_code} url={hf_url}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"[gaia_dataset] hf download exception task={task_id} type={type(exc).__name__} error={exc} url={hf_url}",
+                flush=True,
+            )
             
+        print(
+            f"[gaia_dataset] file unavailable task={task_id} file_name={file_name} split={self.split} config={self.config}",
+            flush=True,
+        )
         return None

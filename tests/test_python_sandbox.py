@@ -75,6 +75,18 @@ def test_allowlisted_env_passes_through():
     assert "HAS_PATH=True" in result
 
 
+def test_blas_thread_env_defaults_are_forced_in_sandbox(monkeypatch):
+    from lilith_agent.tools import python_exec as pe
+
+    for key in pe.BLAS_THREAD_ENV_DEFAULTS:
+        monkeypatch.delenv(key, raising=False)
+
+    env = pe._scrubbed_env()
+
+    for key, value in pe.BLAS_THREAD_ENV_DEFAULTS.items():
+        assert env[key] == value
+
+
 def test_cwd_is_not_repo_root():
     """Subprocess runs in a scratch dir so relative-path writes cannot hit the repo."""
     repo_root = str(Path(__file__).resolve().parent.parent)
