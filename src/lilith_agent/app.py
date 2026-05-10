@@ -307,8 +307,16 @@ def _route_after_model(
     AIMessage has tool_calls; otherwise END.
     """
     if state.get("iterations", 0) >= recursion_limit - 2:
+        print(
+            f"[route] recursion threshold reached iter={state.get('iterations', 0)} limit={recursion_limit}",
+            flush=True,
+        )
         return "fail_safe"
     if _count_tool_calls_since_last_human(state["messages"]) >= budget_hard_cap:
+        print(
+            f"[route] hard cap reached tool_calls={_count_tool_calls_since_last_human(state['messages'])} cap={budget_hard_cap}",
+            flush=True,
+        )
         log.info("[hard_cap] per-question tool-call cap hit; forcing fail_safe")
         return "fail_safe"
     last = state["messages"][-1]
@@ -335,6 +343,10 @@ def _build_tool_node(
         tool_calls = getattr(last, "tool_calls", None) or []
         todo_state_update = None
         if tool_calls:
+            print(
+                f"[tools] dispatching count={len(tool_calls)} names={[tc.get('name') for tc in tool_calls]}",
+                flush=True,
+            )
             log_tools.info(
                 "[tools] dispatching %d call(s): %s",
                 len(tool_calls),
@@ -368,6 +380,7 @@ def _build_tool_node(
 
             key = _call_key(name, args)
             if key in seen:
+                print(f"[tools] dedup tool={name}", flush=True)
                 log.info("[dedup] short-circuited repeat tool call: %s %s", name, args)
                 results.append(ToolMessage(
                     tool_call_id=tc_id,
@@ -392,6 +405,7 @@ def _build_tool_node(
                         if score > best_score:
                             best_prior, best_score = prior_q, score
                     if best_score >= semantic_dedup_threshold:
+                        print(f"[tools] semantic_dedup score={best_score:.2f} tool={name}", flush=True)
                         log.info("[semantic_dedup] %.2f match vs prior: %r ~ %r", best_score, q, best_prior)
                         results.append(ToolMessage(
                             tool_call_id=tc_id,
@@ -409,6 +423,7 @@ def _build_tool_node(
 
             cooldown_limit = _cooldown_limit_for(name)
             if count_recent_errors(name) >= cooldown_limit:
+                print(f"[tools] cooldown tool={name} limit={cooldown_limit}", flush=True)
                 log.info("[loop_breaker] force-cooldown %s (limit=%d)", name, cooldown_limit)
                 results.append(ToolMessage(
                     tool_call_id=tc_id,
@@ -425,6 +440,7 @@ def _build_tool_node(
 
             tool = tools_by_name.get(name)
             if tool is None:
+                print(f"[tools] unknown tool={name}", flush=True)
                 results.append(ToolMessage(
                     tool_call_id=tc_id,
                     name=name or "unknown",
@@ -440,10 +456,12 @@ def _build_tool_node(
             if len(args_preview) > _TOOL_ARG_PREVIEW_CHARS:
                 args_preview = args_preview[:_TOOL_ARG_PREVIEW_CHARS] + "…"
             log_tools.info("[tools] calling tool=%s args=%s", name, args_preview)
+            print(f"[tools] calling tool={name} args={args_preview}", flush=True)
 
             try:
                 out = tool.invoke(args)
             except Exception as e:
+                print(f"[tools] error tool={name} type={type(e).__name__} msg={e}", flush=True)
                 log_tools.warning("[tools] %s raised: %s", name, e)
                 out = f"ERROR: {type(e).__name__}: {e}"
                 if len(out) > 1000:
@@ -471,6 +489,7 @@ def _build_tool_node(
             if len(preview) > _TOOL_RESULT_PREVIEW_CHARS:
                 preview = preview[:_TOOL_RESULT_PREVIEW_CHARS] + "…"
             log_tools.info("[tools] tool result (%d chars): %s", len(out_str), preview)
+            print(f"[tools] result tool={name} chars={len(out_str)} preview={preview}", flush=True)
             results.append(ToolMessage(tool_call_id=tc_id, name=name, content=out_str))
 
         update = {"messages": results}
@@ -521,6 +540,15 @@ def build_react_agent(cfg: Config):
         log.warning("[supervisor] cheap model unavailable; disabled: %s", exc)
         supervisor_model = None
     summarize_fn = _make_tool_result_summarizer(cfg) if cfg.compact_summarize else None
+
+    def _initial_question_from_state(state) -> str:
+        for m in state["messages"]:
+            if isinstance(m, HumanMessage):
+                raw = str(m.content).split("--- BENCHMARK SCORING RULES ---")[0].strip()
+                if raw.startswith("<gaia_question>") and raw.endswith("</gaia_question>"):
+                    raw = raw[len("<gaia_question>"):-len("</gaia_question>")].strip()
+                return raw
+        return ""
 
     def model_node(state):
         from langchain_core.messages import SystemMessage
@@ -604,6 +632,10 @@ def build_react_agent(cfg: Config):
             tool_calls_this_turn,
             len(compacted),
         )
+        print(
+            f"[model] invoking iter={iteration} tool_calls_so_far={tool_calls_this_turn} msgs={len(compacted)}",
+            flush=True,
+        )
         response = model.invoke(prompt_msgs)
 
         # Clean up Gemini signatures and unhelpful metadata to reduce log noise and context bloat
@@ -618,6 +650,7 @@ def build_react_agent(cfg: Config):
 
         # Fallback for empty responses
         if not response.content and not getattr(response, "tool_calls", None):
+            print("[model] blank response detected", flush=True)
             log_model.warning("[model] blank response detected; injecting system nudge")
             response = AIMessage(content=(
                 "SYSTEM: Your previous response was empty. If you have enough information, "
@@ -627,6 +660,7 @@ def build_react_agent(cfg: Config):
         else:
             requested = [tc.get("name") for tc in (getattr(response, "tool_calls", None) or [])]
             if requested:
+                print(f"[model] requested tool_calls={requested}", flush=True)
                 log_model.info("[model] requested tool_calls=%s", requested)
             else:
                 content_text = response.content
@@ -638,22 +672,27 @@ def build_react_agent(cfg: Config):
                 content_text = str(content_text or "").strip().replace("\n", " ")
                 if len(content_text) > _TOOL_RESULT_PREVIEW_CHARS:
                     content_text = content_text[:_TOOL_RESULT_PREVIEW_CHARS] + "…"
+                print(f"[model] finished content={content_text!r}", flush=True)
                 log_model.info("[model] finished content=%r", content_text)
 
         return {"messages": [response], "iterations": iteration + 1}
 
     def fail_safe_node(state):
+        print(f"[fail_safe] emergency override: iter={state.get('iterations', 0)}", flush=True)
         log_fail_safe.warning(
             "[fail_safe] emergency override: iter=%d",
             state.get("iterations", 0),
         )
+        original_question = _initial_question_from_state(state)
         sys_prompt = (
             "SYSTEM EMERGENCY OVERRIDE: You have hit the absolute maximum iteration limit for this task. "
-            "You are FORCED to stop. Provide a brief 'Final Answer:' summarizing what you have tried, "
-            "why it failed, and what the best conclusion is so far."
+            "You are FORCED to stop tool use. Answer the original question, not an intermediate hop. "
+            "Provide a bare final answer in 'Final Answer: ...' form using the best conclusion supported so far. "
+            f"Original question: {original_question}"
         )
         compacted = _compact_old_tool_messages(state["messages"], summarize_fn=summarize_fn)
         response = base_model.invoke([SystemMessage(sys_prompt)] + compacted)
+        print(f"[fail_safe] produced content={_message_text(getattr(response, 'content', ''))[:240]!r}", flush=True)
         return {"messages": [response]}
 
     def supervisor_node(state):
@@ -694,6 +733,10 @@ def build_react_agent(cfg: Config):
             best_answer[:80],
             guidance[:160],
         )
+        print(
+            f"[supervisor] status={status} best={best_answer[:80]!r} guidance={guidance[:160]!r}",
+            flush=True,
+        )
         update = {
             "supervisor_decision": status,
             "supervisor_best_answer": best_answer,
@@ -712,16 +755,21 @@ def build_react_agent(cfg: Config):
     def supervisor_finalizer_node(state):
         best_answer = str(state.get("supervisor_best_answer", "") or "").strip()
         if best_answer:
+            print(f"[supervisor_finalizer] finalizing best={best_answer[:160]!r}", flush=True)
             return {"messages": [AIMessage(content=f"Final Answer: {best_answer}")]}
         guidance = str(state.get("supervisor_guidance", "") or "").strip()
+        original_question = _initial_question_from_state(state)
         compacted = _compact_old_tool_messages(state["messages"], summarize_fn=summarize_fn)
         response = base_model.invoke([
             SystemMessage(content=(
-                "SUPERVISOR FINALIZER: Stop tool use. Produce the best possible Final Answer "
-                f"using the existing evidence. Supervisor guidance: {guidance}"
+                "SUPERVISOR FINALIZER: Stop tool use. Answer the original question, not an intermediate hop. "
+                "Produce a bare final answer in 'Final Answer: ...' form using the existing evidence. "
+                f"Original question: {original_question}\n"
+                f"Supervisor guidance: {guidance}"
             )),
             *compacted,
         ])
+        print(f"[supervisor_finalizer] produced content={_message_text(getattr(response, 'content', ''))[:240]!r}", flush=True)
         return {"messages": [response]}
 
     def extract_memory_node(state):

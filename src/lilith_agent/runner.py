@@ -56,6 +56,51 @@ _LLM_FORMATTER_LEN_GATE = 40
 _ASSIGNMENT_PREFIX = re.compile(r"^\s*(?:x|y|answer|result)\s*[:=]\s*(.+?)\s*$", re.IGNORECASE)
 _COMMA_GROUPED_INTEGER = re.compile(r"^[+-]?\d{1,3}(?:,\d{3})+$")
 _SCALAR_NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$")
+# Matches "to N decimal places" or "to the nearest tenth/hundredth/thousandth"
+_DECIMAL_PLACES_RE = re.compile(
+    r"(?:to|rounded?\s+to|nearest)\s+"
+    r"(?:(\d+)\s+decimal\s+place[s]?|the\s+nearest\s+(tenth|hundredth|thousandth|ten[-\s]?thousandth))",
+    re.IGNORECASE,
+)
+_PRECISION_WORDS = {
+    "tenth": 1, "hundredth": 2, "thousandth": 3,
+    "ten-thousandth": 4, "ten thousandth": 4,
+}
+def _required_decimal_places(question: str) -> int | None:
+    """Return the number of decimal places the question demands, or None."""
+    m = _DECIMAL_PLACES_RE.search(question)
+    if not m:
+        return None
+    if m.group(1):
+        return int(m.group(1))
+    word = m.group(2).lower().replace(" ", "-")
+    return _PRECISION_WORDS.get(word)
+
+
+def _apply_decimal_precision(s: str, places: int) -> str:
+    """Reformat a numeric string to exactly `places` decimal places."""
+    try:
+        value = float(s)
+        return f"{value:.{places}f}"
+    except (ValueError, OverflowError):
+        return s
+
+
+_ANSWER_CONTRACT_QUESTION_MARKERS = (
+    "country", "countries", "capital", "arrival", "time", "meter", "metre",
+    "label", "score", "passenger", "title", "author", "date", "year",
+    "how many",
+)
+_GIVE_UP_PHRASES = (
+    "unknown",
+    "i don't know",
+    "cannot determine",
+    "could not determine",
+    "unable to determine",
+    "not enough information",
+    "could not complete",
+    "why it failed",
+)
 
 
 def _wrap_user_question(text: str) -> str:
@@ -167,7 +212,199 @@ def _normalize_gaia_submission(question: str, answer: str) -> str:
     if ";" in s:
         s = re.sub(r"\s*;\s*", "; ", s).strip()
 
+    required_places = _required_decimal_places(question)
+    if required_places is not None and _SCALAR_NUMBER.fullmatch(s):
+        s = _apply_decimal_precision(s, required_places)
+
     return s
+
+
+def _is_give_up_answer(answer: str) -> bool:
+    s = answer.strip().lower()
+    if not s:
+        return True
+    if s.startswith("agent error"):
+        return False
+    if s in {"unknown", "n/a", "not found"}:
+        return True
+    if len(s) <= 240 and any(phrase in s for phrase in _GIVE_UP_PHRASES):
+        return True
+    return False
+
+
+def _question_has_answer_contract_marker(question: str) -> bool:
+    q = question.lower()
+    return any(re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", q) for marker in _ANSWER_CONTRACT_QUESTION_MARKERS)
+
+
+def _needs_answer_contract_check(question: str, answer: str) -> bool:
+    if _is_give_up_answer(answer):
+        return False
+    q = question.lower()
+    if not _question_has_answer_contract_marker(question):
+        return False
+    if _SCALAR_NUMBER.fullmatch(answer.strip()) and not any(marker in q for marker in ("time", "arrival", "date", "year")):
+        return False
+    return True
+
+
+def _parse_contract_response(content: Any) -> dict[str, str]:
+    if isinstance(content, list):
+        text = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    else:
+        text = str(content or "")
+    text = text.strip()
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        if not match:
+            return {"status": "ok", "submitted_answer": "", "reason": ""}
+        try:
+            parsed = json.loads(match.group(0))
+        except Exception:
+            return {"status": "ok", "submitted_answer": "", "reason": ""}
+    if not isinstance(parsed, dict):
+        return {"status": "ok", "submitted_answer": "", "reason": ""}
+    status = str(parsed.get("status", "ok") or "ok").strip().lower()
+    if status not in {"ok", "repair"}:
+        status = "ok"
+    return {
+        "status": status,
+        "submitted_answer": str(parsed.get("submitted_answer", "") or "").strip(),
+        "reason": str(parsed.get("reason", "") or "").strip(),
+    }
+
+
+def _repair_supported_by_context(question: str, reasoning_trace: str, repaired: str) -> bool:
+    context = f"{question}\n{reasoning_trace}".lower()
+    pieces = [
+        piece.strip(" \t\r\n.,;:()[]{}\"'`")
+        for piece in re.split(r"\s*(?:,|;|\band\b)\s*", repaired)
+    ]
+    pieces = [piece for piece in pieces if piece]
+    if not pieces:
+        return False
+    return all(piece.lower() in context for piece in pieces)
+
+
+def _apply_answer_contract(
+    model: Any,
+    question: str,
+    answer: str,
+    reasoning_trace: str,
+    *,
+    enabled: bool = True,
+) -> str:
+    if not enabled or not _needs_answer_contract_check(question, answer):
+        return answer
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    prompt = (
+        "You are a GAIA benchmark answer contract verifier. Check whether the submitted "
+        "answer answers the ORIGINAL question, not an intermediate hop. If the answer type "
+        "matches the question, return JSON {\"status\":\"ok\"}. If the answer is clearly "
+        "the wrong type and the evidence trace contains the correct final answer, return "
+        "JSON {\"status\":\"repair\",\"submitted_answer\":\"...\",\"reason\":\"...\"}. "
+        "Do not guess. Do not repair unless the replacement appears in the evidence trace."
+    )
+    user = (
+        f"ORIGINAL QUESTION:\n{question}\n\n"
+        f"SUBMITTED ANSWER:\n{answer}\n\n"
+        f"EVIDENCE TRACE:\n{reasoning_trace[-4000:]}"
+    )
+    try:
+        response = model.invoke([SystemMessage(content=prompt), HumanMessage(content=user)])
+    except Exception as exc:
+        log.warning("answer_contract: verifier failed (%s), keeping original answer", exc)
+        return answer
+    decision = _parse_contract_response(getattr(response, "content", ""))
+    if decision["status"] != "repair":
+        return answer
+    repaired = _normalize_gaia_submission(question, decision["submitted_answer"])
+    if not repaired:
+        return answer
+    if not _repair_supported_by_context(question, reasoning_trace, repaired):
+        log.warning("answer_contract: rejected unsupported repair %r", repaired)
+        return answer
+    log.info("answer_contract: repaired answer %r -> %r", answer, repaired)
+    return repaired
+
+
+def _parse_recovery_response(content: Any) -> dict[str, str]:
+    if isinstance(content, list):
+        text = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    else:
+        text = str(content or "")
+    text = text.strip()
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        if not match:
+            return {"status": "keep", "submitted_answer": "", "reason": ""}
+        try:
+            parsed = json.loads(match.group(0))
+        except Exception:
+            return {"status": "keep", "submitted_answer": "", "reason": ""}
+    if not isinstance(parsed, dict):
+        return {"status": "keep", "submitted_answer": "", "reason": ""}
+    status = str(parsed.get("status", "keep") or "keep").strip().lower()
+    if status not in {"keep", "answer"}:
+        status = "keep"
+    return {
+        "status": status,
+        "submitted_answer": str(parsed.get("submitted_answer", "") or "").strip(),
+        "reason": str(parsed.get("reason", "") or "").strip(),
+    }
+
+
+def _apply_give_up_recovery(
+    model: Any,
+    question: str,
+    answer: str,
+    reasoning_trace: str,
+    *,
+    enabled: bool = True,
+) -> str:
+    if not enabled or not _is_give_up_answer(answer):
+        return answer
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    prompt = (
+        "You are a GAIA benchmark give-up recovery verifier. The submitted answer is "
+        "empty, unknown, or a failure summary. If the evidence trace contains a concrete "
+        "answer to the original question, return JSON {\"status\":\"answer\","
+        "\"submitted_answer\":\"...\",\"reason\":\"...\"}. Otherwise return JSON "
+        "{\"status\":\"keep\"}. Do not guess. The submitted_answer must appear in the trace."
+    )
+    user = (
+        f"ORIGINAL QUESTION:\n{question}\n\n"
+        f"CURRENT SUBMITTED ANSWER:\n{answer}\n\n"
+        f"EVIDENCE TRACE:\n{reasoning_trace[-4000:]}"
+    )
+    try:
+        response = model.invoke([SystemMessage(content=prompt), HumanMessage(content=user)])
+    except Exception as exc:
+        log.warning("give_up_recovery: verifier failed (%s), keeping original answer", exc)
+        return answer
+    decision = _parse_recovery_response(getattr(response, "content", ""))
+    if decision["status"] != "answer":
+        return answer
+    recovered = _normalize_gaia_submission(question, decision["submitted_answer"])
+    if not recovered:
+        return answer
+    if not _repair_supported_by_context(question, reasoning_trace, recovered):
+        log.warning("give_up_recovery: rejected unsupported answer %r", recovered)
+        return answer
+    log.info("give_up_recovery: recovered answer %r -> %r", answer, recovered)
+    return recovered
 
 
 def _write_checkpoint_atomic(path: Path, data: dict) -> None:
@@ -239,6 +476,7 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
     cheap_model = get_cheap_model(cfg)
 
     total = len(questions)
+    print(f"[runner] starting batch total={total} checkpoint_dir={checkpoint_root}", flush=True)
 
     def _invoke_task_once(task_state: dict, task_id: str):
         from lilith_agent.memory import ephemeral_memory
@@ -251,6 +489,7 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
         pause_seconds = batch_rate_limit_pause_seconds()
         if pause_seconds is None:
             return
+        print(f"[runner] pausing batch seconds={pause_seconds} reason=rate_limit_window", flush=True)
         log_runner.warning("[runner] pausing batch for %ss due to rate limit window", pause_seconds)
         time.sleep(pause_seconds)
         clear_batch_rate_limit_window()
@@ -260,13 +499,18 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
         task_id = question.get("task_id")
         prompt = question.get("question")
         if not task_id or not prompt:
+            print(f"[runner] skipping invalid question idx={idx} task_id={task_id!r}", flush=True)
             continue
 
         file_name = question.get("file_name")
         if file_name and client:
+            print(f"[runner] task={task_id} downloading file={file_name}", flush=True)
             file_path = client.download_file(task_id, dest_dir=checkpoint_root / "files")
             if file_path:
+                print(f"[runner] task={task_id} file_path={file_path.absolute()}", flush=True)
                 prompt += f"\n\n[Attached File Path: {file_path.absolute()}]"
+            else:
+                print(f"[runner] task={task_id} file_download_missing file={file_name}", flush=True)
 
         # Scoring rules removed from here to reduce per-turn context bloat.
         # They are now applied in a final post-processing step.
@@ -276,6 +520,7 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
             try:
                 checkpoint = json.loads(checkpoint_path.read_text())
                 log_runner.info("[runner] task=%s (%d/%d) skipped (checkpoint exists)", task_id, idx, total)
+                print(f"[runner] task={task_id} ({idx}/{total}) skipped checkpoint={checkpoint_path}", flush=True)
                 answers.append(
                     {
                         "task_id": task_id,
@@ -284,12 +529,14 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
                 )
                 continue
             except Exception:
+                print(f"[runner] task={task_id} checkpoint unreadable path={checkpoint_path}", flush=True)
                 pass
 
         log_runner.info(
             "[runner] task=%s (%d/%d) starting q=%r",
             task_id, idx, total, (prompt[:160] + "…") if len(prompt) > 160 else prompt,
         )
+        print(f"[runner] task={task_id} ({idx}/{total}) starting", flush=True)
 
         state = {
             "messages": [HumanMessage(content=_wrap_user_question(prompt))],
@@ -300,6 +547,10 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
             try:
                 result = _invoke_task_once(state, task_id)
             except RateLimitCooldownError as exc:
+                print(
+                    f"[runner] task={task_id} rate_limited provider={exc.provider} model={exc.model} cooldown={exc.cooldown_seconds}",
+                    flush=True,
+                )
                 log_runner.warning(
                     "[runner] task=%s rate limited provider=%s model=%s cooldown=%s",
                     task_id,
@@ -308,18 +559,22 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
                     exc.cooldown_seconds,
                 )
                 time.sleep(exc.cooldown_seconds)
+                print(f"[runner] task={task_id} retrying after cooldown", flush=True)
                 result = _invoke_task_once(state, task_id)
         except RateLimitCooldownError as exc:
+            print(f"[runner] task={task_id} rate_limited_after_retry error={exc}", flush=True)
             log_runner.warning("[runner] task=%s rate limited after retry: %s", task_id, exc)
             answers.append({"task_id": task_id, "submitted_answer": "AGENT ERROR: RATE LIMITED"})
             _maybe_pause_for_batch_rate_limit()
             continue
         except QuestionRateLimitStreakError as exc:
+            print(f"[runner] task={task_id} rate_limit_streak error={exc}", flush=True)
             log_runner.warning("[runner] task=%s rate limit streak: %s", task_id, exc)
             answers.append({"task_id": task_id, "submitted_answer": "AGENT ERROR: RATE LIMITED"})
             _maybe_pause_for_batch_rate_limit()
             continue
         except BatchAbortRateLimitError as exc:
+            print(f"[runner] task={task_id} batch_abort_rate_limit reason={exc.reason}", flush=True)
             log_runner.warning("[runner] task=%s batch abort rate limit: %s", task_id, exc)
             answers.append({"task_id": task_id, "submitted_answer": "AGENT ERROR: RATE LIMITED"})
             _write_checkpoint_atomic(
@@ -333,6 +588,7 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
             _maybe_pause_for_batch_rate_limit()
             continue
         except Exception as exc:
+            print(f"[runner] task={task_id} agent_error type={type(exc).__name__} error={exc}", flush=True)
             log_runner.warning("[runner] task=%s agent error: %s", task_id, exc)
             answers.append(
                 {
@@ -359,8 +615,22 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
             llm_formatter_enabled=cfg.llm_formatter_enabled,
         )
         submitted_answer = _normalize_gaia_submission(prompt, submitted_answer)
-        
+
         reasoning_trace = _render_reasoning_trace(result["messages"])
+        submitted_answer = _apply_answer_contract(
+            cheap_model,
+            prompt,
+            submitted_answer,
+            reasoning_trace,
+            enabled=cfg.answer_contract_enabled,
+        )
+        submitted_answer = _apply_give_up_recovery(
+            cheap_model,
+            prompt,
+            submitted_answer,
+            reasoning_trace,
+            enabled=cfg.give_up_recovery_enabled,
+        )
 
         checkpoint = {
             "task_id": task_id,
@@ -371,15 +641,19 @@ def run_agent_on_questions(graph: Any, questions: list[dict], checkpoint_dir: st
         
         if submitted_answer and not submitted_answer.startswith("AGENT ERROR"):
             _write_checkpoint_atomic(checkpoint_path, checkpoint)
+            print(f"[runner] task={task_id} checkpoint_written path={checkpoint_path}", flush=True)
 
         log_runner.info(
             "[runner] task=%s (%d/%d) answer=%r",
             task_id, idx, total,
             (submitted_answer[:160] + "…") if len(submitted_answer) > 160 else submitted_answer,
         )
+        answer_preview = (submitted_answer[:160] + "…") if len(submitted_answer) > 160 else submitted_answer
+        print(f"[runner] task={task_id} ({idx}/{total}) answer={answer_preview!r}", flush=True)
         answers.append({"task_id": task_id, "submitted_answer": submitted_answer.strip()})
         _maybe_pause_for_batch_rate_limit()
 
+    print(f"[runner] finished batch produced={len(answers)}", flush=True)
     return answers
 
 

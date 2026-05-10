@@ -49,6 +49,8 @@ class Config:
     semantic_dedup_threshold: float = 0.5
     compact_summarize: bool = True
     llm_formatter_enabled: bool = True
+    answer_contract_enabled: bool = True
+    give_up_recovery_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -79,4 +81,6 @@ class Config:
             semantic_dedup_threshold=_get_float_env("GAIA_SEMANTIC_DEDUP_THRESHOLD", "0.5"),
             compact_summarize=os.getenv("GAIA_COMPACT_SUMMARIZE", "true").lower() == "true",
             llm_formatter_enabled=os.getenv("GAIA_LLM_FORMATTER_ENABLED", "true").lower() == "true",
+            answer_contract_enabled=os.getenv("GAIA_ANSWER_CONTRACT_ENABLED", "true").lower() == "true",
+            give_up_recovery_enabled=os.getenv("GAIA_GIVE_UP_RECOVERY_ENABLED", "true").lower() == "true",
         )

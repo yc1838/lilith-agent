@@ -81,6 +81,7 @@ class ScoringApiClient:
             f"Scoring API unavailable while trying to {action} ({detail}); "
             f"falling back to GAIA dataset."
         )
+        print(self.last_warning, flush=True)
         log.warning(self.last_warning)
         return dataset_client
 

@@ -12,3 +12,4 @@ anatomy_full.pdf
 *.csv
 .pycache/*
 .worktrees/
+__pycache__/*

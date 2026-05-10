@@ -40,3 +40,19 @@ def test_compact_summarize_defaults_on_and_is_env_overridable(monkeypatch):
 
     monkeypatch.setenv("GAIA_COMPACT_SUMMARIZE", "false")
     assert Config.from_env().compact_summarize is False
+
+
+def test_answer_contract_defaults_on_and_is_env_overridable(monkeypatch):
+    monkeypatch.delenv("GAIA_ANSWER_CONTRACT_ENABLED", raising=False)
+    assert Config.from_env().answer_contract_enabled is True
+
+    monkeypatch.setenv("GAIA_ANSWER_CONTRACT_ENABLED", "false")
+    assert Config.from_env().answer_contract_enabled is False
+
+
+def test_give_up_recovery_defaults_on_and_is_env_overridable(monkeypatch):
+    monkeypatch.delenv("GAIA_GIVE_UP_RECOVERY_ENABLED", raising=False)
+    assert Config.from_env().give_up_recovery_enabled is True
+
+    monkeypatch.setenv("GAIA_GIVE_UP_RECOVERY_ENABLED", "false")
+    assert Config.from_env().give_up_recovery_enabled is False
