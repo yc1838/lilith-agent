@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
+from collections import deque
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 from langchain_anthropic import ChatAnthropic
@@ -11,43 +18,69 @@ from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
-import logging
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, Retrying, AsyncRetrying
+from tenacity import AsyncRetrying, Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 from lilith_agent.config import Config
 
-# Identify retryable exceptions (429s) across providers
-RETRY_EXCEPTIONS = []
 try:
     from google.api_core.exceptions import ResourceExhausted
-    RETRY_EXCEPTIONS.append(ResourceExhausted)
 except ImportError:
-    pass
+    ResourceExhausted = None
+
+try:
+    from google.genai.errors import ClientError as GenAIClientError
+except ImportError:
+    GenAIClientError = None
 
 try:
     from anthropic import RateLimitError as AnthropicRateLimitError
-    RETRY_EXCEPTIONS.append(AnthropicRateLimitError)
 except ImportError:
-    pass
+    AnthropicRateLimitError = None
 
 try:
     from openai import RateLimitError as OpenAIRateLimitError
-    RETRY_EXCEPTIONS.append(OpenAIRateLimitError)
 except ImportError:
-    pass
+    OpenAIRateLimitError = None
 
-RETRY_EXCEPTIONS = tuple(RETRY_EXCEPTIONS)
 
-# Shared retry configuration for context managers
-_RETRY_PARAMS = dict(
-    retry=retry_if_exception_type(RETRY_EXCEPTIONS) if RETRY_EXCEPTIONS else lambda e: False,
-    wait=wait_exponential(multiplier=2, min=4, max=60),
-    stop=stop_after_attempt(5),
-    before_sleep=lambda retry_state: log.warning(
-        f"LLM Rate Limit (429) hit. Retrying in {retry_state.next_action.sleep}s... "
-        f"(Attempt {retry_state.attempt_number}/5)"
-    ),
-    reraise=True
-)
+def is_retryable_rate_limit(exc: BaseException) -> bool:
+    if ResourceExhausted is not None and isinstance(exc, ResourceExhausted):
+        return True
+    if GenAIClientError is not None and isinstance(exc, GenAIClientError):
+        return getattr(exc, "code", None) == 429
+    if AnthropicRateLimitError is not None and isinstance(exc, AnthropicRateLimitError):
+        return True
+    if OpenAIRateLimitError is not None and isinstance(exc, OpenAIRateLimitError):
+        return True
+    return False
+
+
+def _tenacity_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+async def _async_tenacity_sleep(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+def _base_retry_params() -> dict[str, Any]:
+    return dict(
+        retry=retry_if_exception(is_retryable_rate_limit),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        stop=stop_after_attempt(5),
+        before_sleep=lambda retry_state: log.warning(
+            f"LLM Rate Limit (429) hit. Retrying in {retry_state.next_action.sleep}s... "
+            f"(Attempt {retry_state.attempt_number}/5)"
+        ),
+        reraise=True,
+    )
+
+
+def _sync_retry_params() -> dict[str, Any]:
+    return {**_base_retry_params(), "sleep": _tenacity_sleep}
+
+
+def _async_retry_params() -> dict[str, Any]:
+    return {**_base_retry_params(), "sleep": _async_tenacity_sleep}
 
 try:
     from langchain_community.cache import SQLiteCache
@@ -77,6 +110,180 @@ log = logging.getLogger(__name__)
 
 LMSTUDIO_DEFAULT_BASE_URL = "http://localhost:1234/v1"
 _NO_THINK = "/no_think"
+_GEMINI_COOLDOWN_MODELS = {"gemini-3-flash-preview", "gemini-3.1-pro"}
+_COOLDOWN_LADDER_SECONDS = (60, 120, 300)
+_QUESTION_STREAK_LIMIT = 50
+_BATCH_WINDOW_SIZE = 100
+_BATCH_WINDOW_RATE_LIMIT_THRESHOLD = 70
+_BATCH_PAUSE_LADDER_SECONDS = (300, 600, 1200)
+_cooldown_until: dict[tuple[str, str], float] = {}
+_rate_limit_exhaustions: dict[tuple[str, str], int] = {}
+_question_rate_limit_streak: ContextVar[int | None] = ContextVar("question_rate_limit_streak", default=None)
+_batch_rate_limit_window: deque[bool] = deque(maxlen=_BATCH_WINDOW_SIZE)
+_batch_pause_count = 0
+
+
+@dataclass
+class RateLimitCooldownError(Exception):
+    provider: str
+    model: str
+    cooldown_seconds: int
+    original_error: str
+
+    def __str__(self) -> str:
+        return (
+            f"rate limited provider={self.provider} model={self.model} "
+            f"cooldown={self.cooldown_seconds}s original={self.original_error}"
+        )
+
+
+@dataclass
+class BatchAbortRateLimitError(Exception):
+    reason: str
+    original_error: str
+
+    def __str__(self) -> str:
+        return f"batch abort rate limit: {self.reason}; original={self.original_error}"
+
+
+@dataclass
+class QuestionRateLimitStreakError(Exception):
+    count: int
+
+    def __str__(self) -> str:
+        return f"question hit {self.count} consecutive rate-limit events"
+
+
+def _reset_rate_limit_state_for_tests() -> None:
+    global _batch_pause_count
+    _cooldown_until.clear()
+    _rate_limit_exhaustions.clear()
+    _batch_rate_limit_window.clear()
+    _batch_pause_count = 0
+
+
+@contextmanager
+def rate_limit_question_scope():
+    token = _question_rate_limit_streak.set(0)
+    try:
+        yield
+    finally:
+        _question_rate_limit_streak.reset(token)
+
+
+def record_rate_limit_observation(exc: BaseException) -> None:
+    if not is_retryable_rate_limit(exc):
+        return
+    _batch_rate_limit_window.append(True)
+    current = _question_rate_limit_streak.get()
+    if current is None:
+        return
+    current += 1
+    _question_rate_limit_streak.set(current)
+    if current >= _QUESTION_STREAK_LIMIT:
+        raise QuestionRateLimitStreakError(count=current) from exc
+
+
+def record_rate_limit_success() -> None:
+    _batch_rate_limit_window.append(False)
+    if _question_rate_limit_streak.get() is not None:
+        _question_rate_limit_streak.set(0)
+
+
+def batch_rate_limit_pause_seconds() -> int | None:
+    global _batch_pause_count
+    if len(_batch_rate_limit_window) < _BATCH_WINDOW_SIZE:
+        return None
+    if sum(_batch_rate_limit_window) < _BATCH_WINDOW_RATE_LIMIT_THRESHOLD:
+        return None
+    _batch_pause_count += 1
+    idx = min(_batch_pause_count - 1, len(_BATCH_PAUSE_LADDER_SECONDS) - 1)
+    return _BATCH_PAUSE_LADDER_SECONDS[idx]
+
+
+def clear_batch_rate_limit_window() -> None:
+    _batch_rate_limit_window.clear()
+
+
+def _gemini_lane(provider: str | None, model_name: str | None) -> tuple[str, str] | None:
+    if provider == "google" and model_name in _GEMINI_COOLDOWN_MODELS:
+        return (provider, model_name)
+    return None
+
+
+def _cooldown_seconds_for_exhaustion(count: int) -> int:
+    idx = min(max(count, 1), len(_COOLDOWN_LADDER_SECONDS)) - 1
+    return _COOLDOWN_LADDER_SECONDS[idx]
+
+
+def _sleep_active_cooldown(lane: tuple[str, str] | None) -> None:
+    if lane is None:
+        return
+    remaining = _cooldown_until.get(lane, 0.0) - time.monotonic()
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+async def _sleep_active_cooldown_async(lane: tuple[str, str] | None) -> None:
+    if lane is None:
+        return
+    remaining = _cooldown_until.get(lane, 0.0) - time.monotonic()
+    if remaining > 0:
+        await asyncio.sleep(remaining)
+
+
+def _record_success(lane: tuple[str, str] | None) -> None:
+    if lane is None:
+        return
+    _rate_limit_exhaustions[lane] = 0
+    _cooldown_until.pop(lane, None)
+
+
+def _record_exhausted_rate_limit(lane: tuple[str, str], exc: BaseException) -> RateLimitCooldownError:
+    count = _rate_limit_exhaustions.get(lane, 0) + 1
+    _rate_limit_exhaustions[lane] = count
+    cooldown = _cooldown_seconds_for_exhaustion(count)
+    _cooldown_until[lane] = time.monotonic() + cooldown
+    return RateLimitCooldownError(
+        provider=lane[0],
+        model=lane[1],
+        cooldown_seconds=cooldown,
+        original_error=str(exc),
+    )
+
+
+def _iter_error_details(exc: BaseException) -> list[dict[str, Any]]:
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        nested = details.get("error", {}).get("details", details.get("details", []))
+        return nested if isinstance(nested, list) else []
+    return details if isinstance(details, list) else []
+
+
+def _parse_retry_delay_seconds(value: Any) -> float | None:
+    if isinstance(value, str) and value.endswith("s"):
+        try:
+            return float(value[:-1])
+        except ValueError:
+            return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _batch_abort_reason(exc: BaseException) -> str | None:
+    for detail in _iter_error_details(exc):
+        retry_delay = _parse_retry_delay_seconds(detail.get("retryDelay"))
+        if retry_delay is not None and retry_delay > 600:
+            return f"retry delay {retry_delay:g}s exceeds batch threshold"
+        violations = detail.get("violations", [])
+        if isinstance(violations, list):
+            for violation in violations:
+                if isinstance(violation, dict) and "PerDay" in str(violation.get("quotaId", "")):
+                    return f"daily quota exhausted: {violation.get('quotaId')}"
+        if "PerDay" in str(detail.get("quotaId", "")):
+            return f"daily quota exhausted: {detail.get('quotaId')}"
+    return None
 
 
 class _NoThinkWrapper(BaseChatModel):
@@ -141,42 +348,113 @@ class _RetryWrapper(BaseChatModel):
     """Wraps any BaseChatModel to apply exponential backoff on 429 errors."""
 
     inner: BaseChatModel
+    provider: str | None = None
+    model_name: str | None = None
 
     @property
     def _llm_type(self) -> str:
         return f"retry-{self.inner._llm_type}"
 
     def _generate(self, *args, **kwargs):
-        for attempt in Retrying(**_RETRY_PARAMS):
-            with attempt:
-                return self.inner._generate(*args, **kwargs)
+        lane = _gemini_lane(self.provider, self.model_name)
+        _sleep_active_cooldown(lane)
+        try:
+            for attempt in Retrying(**_sync_retry_params()):
+                with attempt:
+                    try:
+                        result = self.inner._generate(*args, **kwargs)
+                    except Exception as observed:
+                        record_rate_limit_observation(observed)
+                        raise
+                    record_rate_limit_success()
+                    _record_success(lane)
+                    return result
+        except Exception as exc:
+            if lane is not None and is_retryable_rate_limit(exc):
+                reason = _batch_abort_reason(exc)
+                if reason is not None:
+                    raise BatchAbortRateLimitError(reason=reason, original_error=str(exc)) from exc
+                raise _record_exhausted_rate_limit(lane, exc) from exc
+            raise
 
     async def _agenerate(self, *args, **kwargs):
-        async for attempt in AsyncRetrying(**_RETRY_PARAMS):
-            with attempt:
-                return await self.inner._agenerate(*args, **kwargs)
+        lane = _gemini_lane(self.provider, self.model_name)
+        await _sleep_active_cooldown_async(lane)
+        try:
+            async for attempt in AsyncRetrying(**_async_retry_params()):
+                with attempt:
+                    try:
+                        result = await self.inner._agenerate(*args, **kwargs)
+                    except Exception as observed:
+                        record_rate_limit_observation(observed)
+                        raise
+                    record_rate_limit_success()
+                    _record_success(lane)
+                    return result
+        except Exception as exc:
+            if lane is not None and is_retryable_rate_limit(exc):
+                reason = _batch_abort_reason(exc)
+                if reason is not None:
+                    raise BatchAbortRateLimitError(reason=reason, original_error=str(exc)) from exc
+                raise _record_exhausted_rate_limit(lane, exc) from exc
+            raise
 
     def bind_tools(self, tools: Any, **kwargs: Any):
         bound = self.inner.bind_tools(tools, **kwargs)
-        # We need to wrap the resulting bound tool caller's invoke method too
-        return _BoundRetryWrapper(bound=bound)
+        return _BoundRetryWrapper(bound=bound, provider=self.provider, model_name=self.model_name)
 
 
 class _BoundRetryWrapper(Runnable):
     """Wraps a tool-bound Runnable to apply retry logic to .invoke()."""
 
-    def __init__(self, bound):
+    def __init__(self, bound, provider: str | None = None, model_name: str | None = None):
         self._bound = bound
+        self._provider = provider
+        self._model_name = model_name
 
     def invoke(self, input, config=None, **kwargs):
-        for attempt in Retrying(**_RETRY_PARAMS):
-            with attempt:
-                return self._bound.invoke(input, config=config, **kwargs)
+        lane = _gemini_lane(self._provider, self._model_name)
+        _sleep_active_cooldown(lane)
+        try:
+            for attempt in Retrying(**_sync_retry_params()):
+                with attempt:
+                    try:
+                        result = self._bound.invoke(input, config=config, **kwargs)
+                    except Exception as observed:
+                        record_rate_limit_observation(observed)
+                        raise
+                    record_rate_limit_success()
+                    _record_success(lane)
+                    return result
+        except Exception as exc:
+            if lane is not None and is_retryable_rate_limit(exc):
+                reason = _batch_abort_reason(exc)
+                if reason is not None:
+                    raise BatchAbortRateLimitError(reason=reason, original_error=str(exc)) from exc
+                raise _record_exhausted_rate_limit(lane, exc) from exc
+            raise
 
     async def ainvoke(self, input, config=None, **kwargs):
-        async for attempt in AsyncRetrying(**_RETRY_PARAMS):
-            with attempt:
-                return await self._bound.ainvoke(input, config=config, **kwargs)
+        lane = _gemini_lane(self._provider, self._model_name)
+        await _sleep_active_cooldown_async(lane)
+        try:
+            async for attempt in AsyncRetrying(**_async_retry_params()):
+                with attempt:
+                    try:
+                        result = await self._bound.ainvoke(input, config=config, **kwargs)
+                    except Exception as observed:
+                        record_rate_limit_observation(observed)
+                        raise
+                    record_rate_limit_success()
+                    _record_success(lane)
+                    return result
+        except Exception as exc:
+            if lane is not None and is_retryable_rate_limit(exc):
+                reason = _batch_abort_reason(exc)
+                if reason is not None:
+                    raise BatchAbortRateLimitError(reason=reason, original_error=str(exc)) from exc
+                raise _record_exhausted_rate_limit(lane, exc) from exc
+            raise
 
     def __getattr__(self, name):
         return getattr(self._bound, name)
@@ -188,7 +466,7 @@ def _build(provider: str, model: str, cfg: Config) -> BaseChatModel:
     
     # helper to wrap final model
     def _wrap(m):
-        return _RetryWrapper(inner=m)
+        return _RetryWrapper(inner=m, provider=provider, model_name=model)
 
     if provider == "ollama":
         return _wrap(ChatOllama(model=model, num_predict=max_tokens))

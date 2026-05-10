@@ -7,7 +7,7 @@ import string
 import ast
 from typing import Callable
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 import os
 from pathlib import Path
@@ -19,6 +19,10 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     iterations: int
     todos: list[str]
+    supervisor_nudges: int
+    supervisor_decision: str
+    supervisor_best_answer: str
+    supervisor_guidance: str
 
 
 from lilith_agent.config import Config
@@ -70,6 +74,9 @@ _BUDGET_WARN_AT = 15
 _BUDGET_HARD_CAP = 25
 _DEFAULT_RECURSION_LIMIT = 50
 _DEFAULT_COOLDOWN_LIMIT = 3
+_FAIL_SAFE_RECURSION_HEADROOM = 4
+_SUPERVISOR_MIN_TOOL_CALLS = 5
+_SUPERVISOR_RECENT_MESSAGES = 12
 
 
 _RESPONSE_METADATA_NOISE_KEYS = frozenset({
@@ -98,6 +105,39 @@ def _cooldown_limit_for(tool_name: str | None) -> int:
     tolerance. Replaces the `3 if name == "web_search" else 3` no-op ternary.
     """
     return _DEFAULT_COOLDOWN_LIMIT
+
+
+def _message_text(content) -> str:
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    return str(content or "")
+
+
+def _parse_supervisor_decision(content) -> dict:
+    text = _message_text(content).strip()
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        if not match:
+            return {"status": "continue"}
+        try:
+            parsed = json.loads(match.group(0))
+        except Exception:
+            return {"status": "continue"}
+    if not isinstance(parsed, dict):
+        return {"status": "continue"}
+    status = str(parsed.get("status", "continue")).lower()
+    if status not in {"continue", "nudge", "finalize"}:
+        status = "continue"
+    return {
+        "status": status,
+        "best_answer": str(parsed.get("best_answer", "") or "").strip(),
+        "guidance": str(parsed.get("guidance", "") or parsed.get("reason", "") or "").strip(),
+    }
 
 _SEMANTIC_DEDUP_THRESHOLD = 0.5
 _STOPWORDS = {
@@ -473,7 +513,13 @@ def build_react_agent(cfg: Config):
         log.warning("Tools not found; running with zero tools.")
         tools = []
 
-    model = get_extra_strong_model(cfg).bind_tools(tools)
+    base_model = get_extra_strong_model(cfg)
+    model = base_model.bind_tools(tools)
+    try:
+        supervisor_model = get_cheap_model(cfg)
+    except Exception as exc:
+        log.warning("[supervisor] cheap model unavailable; disabled: %s", exc)
+        supervisor_model = None
     summarize_fn = _make_tool_result_summarizer(cfg) if cfg.compact_summarize else None
 
     def model_node(state):
@@ -597,7 +643,6 @@ def build_react_agent(cfg: Config):
         return {"messages": [response], "iterations": iteration + 1}
 
     def fail_safe_node(state):
-        from langchain_core.messages import SystemMessage
         log_fail_safe.warning(
             "[fail_safe] emergency override: iter=%d",
             state.get("iterations", 0),
@@ -608,7 +653,75 @@ def build_react_agent(cfg: Config):
             "why it failed, and what the best conclusion is so far."
         )
         compacted = _compact_old_tool_messages(state["messages"], summarize_fn=summarize_fn)
-        response = model.invoke([SystemMessage(sys_prompt)] + compacted)
+        response = base_model.invoke([SystemMessage(sys_prompt)] + compacted)
+        return {"messages": [response]}
+
+    def supervisor_node(state):
+        tool_calls_this_turn = _count_tool_calls_since_last_human(state["messages"])
+        if supervisor_model is None or tool_calls_this_turn < _SUPERVISOR_MIN_TOOL_CALLS:
+            return {
+                "supervisor_decision": "continue",
+                "supervisor_best_answer": "",
+                "supervisor_guidance": "",
+            }
+
+        recent_messages = state["messages"][-_SUPERVISOR_RECENT_MESSAGES:]
+        rendered = []
+        for msg in recent_messages:
+            name = getattr(msg, "name", "") or msg.__class__.__name__
+            rendered.append(f"{name}: {_message_text(getattr(msg, 'content', ''))[:1200]}")
+        prompt = (
+            "You are a cheap supervisor for a benchmark ReAct agent. Decide whether the agent "
+            "already has enough evidence to answer or is repeating low-value tool work. "
+            "Return ONLY JSON with keys status, best_answer, guidance. "
+            "status must be continue, nudge, or finalize. Use nudge when evidence likely supports "
+            "an answer but one more agent turn is acceptable. Use finalize when the agent was already "
+            "nudged or the evidence is conclusive."
+        )
+        response = supervisor_model.invoke([
+            SystemMessage(content=prompt),
+            HumanMessage(content="\n\n".join(rendered)),
+        ])
+        decision = _parse_supervisor_decision(getattr(response, "content", ""))
+        status = decision["status"]
+        best_answer = decision.get("best_answer", "")
+        guidance = decision.get("guidance", "")
+        if status == "nudge" and state.get("supervisor_nudges", 0) > 0:
+            status = "finalize"
+        log.info(
+            "[supervisor] status=%s best=%r guidance=%r",
+            status,
+            best_answer[:80],
+            guidance[:160],
+        )
+        update = {
+            "supervisor_decision": status,
+            "supervisor_best_answer": best_answer,
+            "supervisor_guidance": guidance,
+        }
+        if status == "nudge":
+            update["supervisor_nudges"] = state.get("supervisor_nudges", 0) + 1
+            update["messages"] = [SystemMessage(content=(
+                "SUPERVISOR: Evidence suggests you may already be able to answer. "
+                f"Best current answer: {best_answer or 'unknown'}. "
+                f"Guidance: {guidance or 'Stop exploring unless a specific missing fact remains.'} "
+                "If no specific missing fact remains, provide Final Answer now."
+            ))]
+        return update
+
+    def supervisor_finalizer_node(state):
+        best_answer = str(state.get("supervisor_best_answer", "") or "").strip()
+        if best_answer:
+            return {"messages": [AIMessage(content=f"Final Answer: {best_answer}")]}
+        guidance = str(state.get("supervisor_guidance", "") or "").strip()
+        compacted = _compact_old_tool_messages(state["messages"], summarize_fn=summarize_fn)
+        response = base_model.invoke([
+            SystemMessage(content=(
+                "SUPERVISOR FINALIZER: Stop tool use. Produce the best possible Final Answer "
+                f"using the existing evidence. Supervisor guidance: {guidance}"
+            )),
+            *compacted,
+        ])
         return {"messages": [response]}
 
     def extract_memory_node(state):
@@ -629,6 +742,8 @@ def build_react_agent(cfg: Config):
     graph = StateGraph(AgentState)
     graph.add_node("model", model_node)
     graph.add_node("tools", tool_node)
+    graph.add_node("supervisor", supervisor_node)
+    graph.add_node("supervisor_finalizer", supervisor_finalizer_node)
     graph.add_node("fail_safe", fail_safe_node)
     graph.add_node("extract_memory", extract_memory_node)
 
@@ -641,7 +756,13 @@ def build_react_agent(cfg: Config):
 
     graph.set_entry_point("model")
     graph.add_conditional_edges("model", _router, {"tools": "tools", "fail_safe": "fail_safe", "extract_memory": "extract_memory"})
-    graph.add_edge("tools", "model")
+    graph.add_edge("tools", "supervisor")
+    graph.add_conditional_edges(
+        "supervisor",
+        lambda state: "supervisor_finalizer" if state.get("supervisor_decision") == "finalize" else "model",
+        {"model": "model", "supervisor_finalizer": "supervisor_finalizer"},
+    )
+    graph.add_edge("supervisor_finalizer", "extract_memory")
     graph.add_edge("fail_safe", "extract_memory")
     graph.add_edge("extract_memory", END)
 
@@ -649,4 +770,4 @@ def build_react_agent(cfg: Config):
     memory_saver = build_checkpointer(lilith_home)
 
     compiled = graph.compile(checkpointer=memory_saver)
-    return compiled.with_config({"recursion_limit": cfg.recursion_limit})
+    return compiled.with_config({"recursion_limit": cfg.recursion_limit + cfg.budget_hard_cap + _FAIL_SAFE_RECURSION_HEADROOM})
