@@ -71,6 +71,26 @@ def test_graph_returns_fail_safe_answer_when_hard_cap_hits_near_recursion_limit(
     assert result["messages"][-1].content == "Final Answer: best effort answer"
 
 
+def test_build_react_agent_prints_effective_recursion_limit(monkeypatch, tmp_path, capsys):
+    class FakeModel:
+        def bind_tools(self, tools):
+            return self
+
+    cfg = Config.from_env()
+    cfg.recursion_limit = 50
+    cfg.budget_hard_cap = 25
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: FakeModel())
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: FakeModel())
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+
+    build_react_agent(cfg)
+
+    captured = capsys.readouterr().out
+    assert "[graph] effective_recursion_limit=79 logical_recursion_limit=50 budget_hard_cap=25 headroom=4" in captured
+
+
 def test_fail_safe_uses_unbound_model_to_prevent_more_tool_calls(monkeypatch, tmp_path):
     class FakeBoundModel:
         def __init__(self):

@@ -819,5 +819,13 @@ def build_react_agent(cfg: Config):
     lilith_home = Path(os.getenv("LILITH_HOME", ".lilith"))
     memory_saver = build_checkpointer(lilith_home)
 
+    effective_recursion_limit = cfg.recursion_limit + cfg.budget_hard_cap + _FAIL_SAFE_RECURSION_HEADROOM
+    print(
+        f"[graph] effective_recursion_limit={effective_recursion_limit} "
+        f"logical_recursion_limit={cfg.recursion_limit} "
+        f"budget_hard_cap={cfg.budget_hard_cap} "
+        f"headroom={_FAIL_SAFE_RECURSION_HEADROOM}",
+        flush=True,
+    )
     compiled = graph.compile(checkpointer=memory_saver)
-    return compiled.with_config({"recursion_limit": cfg.recursion_limit + cfg.budget_hard_cap + _FAIL_SAFE_RECURSION_HEADROOM})
+    return compiled.with_config({"recursion_limit": effective_recursion_limit})
