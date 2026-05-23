@@ -49,6 +49,30 @@ class ScoringApiClientTests(unittest.TestCase):
         self.assertIn("429", client.last_warning or "")
         dataset_client.get_questions.assert_called_once_with()
 
+    def test_fallback_prints_hf_visible_warning(self) -> None:
+        response = Mock(status_code=503, headers={})
+        error = requests.HTTPError("Service Unavailable", response=response)
+        response.raise_for_status.side_effect = error
+
+        session = Mock()
+        session.get.return_value = response
+        dataset_client = Mock()
+        dataset_client.get_questions.return_value = []
+
+        client = ScoringApiClient(
+            api_url="https://example.com",
+            session=session,
+            dataset_client=dataset_client,
+        )
+
+        with patch("builtins.print") as printed:
+            client.get_questions()
+
+        printed.assert_any_call(
+            "Scoring API unavailable while trying to fetch questions (status=503); falling back to GAIA dataset.",
+            flush=True,
+        )
+
     def test_download_file_falls_back_to_dataset_on_429(self) -> None:
         response = Mock(status_code=429, headers={})
         error = requests.HTTPError("Too Many Requests", response=response)

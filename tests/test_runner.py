@@ -127,8 +127,25 @@ def test_runner_retries_same_question_once_after_cooldown(monkeypatch, tmp_path:
     assert graph.calls == 2
     assert graph.thread_ids == ["task-1", "task-1"]
     assert sleeps == [12]
-    assert answers == [{"task_id": "task-1", "submitted_answer": "Final Answer: 42"}]
+    assert answers == [{"task_id": "task-1", "submitted_answer": "42"}]
     assert (tmp_path / "task-1.json").exists()
+
+
+def test_runner_prints_hf_visible_progress_and_success(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr("lilith_agent.runner._final_formatting_cleanup", lambda model, question, raw, llm_formatter_enabled=True: raw)
+
+    answers = run_agent_on_questions(
+        _GraphAlwaysSucceeds(),
+        [{"task_id": "task-print", "question": "What is visible?"}],
+        tmp_path,
+    )
+
+    captured = capsys.readouterr().out
+    assert "[runner] starting batch total=1" in captured
+    assert "[runner] task=task-print (1/1) starting" in captured
+    assert "[runner] task=task-print (1/1) answer='answer-1'" in captured
+    assert "[runner] finished batch produced=1" in captured
+    assert answers == [{"task_id": "task-print", "submitted_answer": "answer-1"}]
 
 
 class _GraphAlwaysCooldown:
@@ -249,6 +266,218 @@ class _GraphAlwaysSucceeds:
     def invoke(self, state, config):
         self.calls += 1
         return {"messages": [AIMessage(content=f"answer-{self.calls}")]}
+
+
+class _GraphReturnsAssignmentAnswer:
+    def invoke(self, state, config):
+        return {"messages": [AIMessage(content="x = 563.9")]}
+
+
+class _GraphReturnsWrongTypeWithEvidence:
+    def invoke(self, state, config):
+        return {
+            "messages": [
+                AIMessage(content="Evidence: Dili is the capital of Timor-Leste. Naypyidaw is the capital of Myanmar."),
+                AIMessage(content="Final Answer: Dili, Naypyidaw"),
+            ]
+        }
+
+
+class _GraphReturnsUnknownWithEvidence:
+    def invoke(self, state, config):
+        return {
+            "messages": [
+                AIMessage(content="Evidence gathered from the page: the exact UI label is Citations."),
+                AIMessage(content="Final Answer: unknown"),
+            ]
+        }
+
+
+class _FakeContractModel:
+    def __init__(self, response: str):
+        self.response = response
+        self.called = False
+
+    def invoke(self, _messages):
+        self.called = True
+
+        class _Resp:
+            pass
+
+        r = _Resp()
+        r.content = self.response
+        return r
+
+
+class _RaiseIfContractCalled:
+    def invoke(self, _messages):
+        raise AssertionError("contract verifier should not have been called")
+
+
+def test_answer_contract_repairs_wrong_type_when_repair_is_supported_by_trace():
+    from lilith_agent.runner import _apply_answer_contract
+
+    model = _FakeContractModel('{"status":"repair","submitted_answer":"Timor-Leste, Myanmar"}')
+
+    out = _apply_answer_contract(
+        model,
+        "What countries have the capitals Dili and Naypyidaw?",
+        "Dili, Naypyidaw",
+        "Dili is the capital of Timor-Leste. Naypyidaw is the capital of Myanmar.",
+    )
+
+    assert model.called is True
+    assert out == "Timor-Leste, Myanmar"
+
+
+def test_answer_contract_rejects_unsupported_repair():
+    from lilith_agent.runner import _apply_answer_contract
+
+    model = _FakeContractModel('{"status":"repair","submitted_answer":"Indonesia, Myanmar"}')
+
+    out = _apply_answer_contract(
+        model,
+        "What countries have the capitals Dili and Naypyidaw?",
+        "Dili, Naypyidaw",
+        "Dili is a capital city. Naypyidaw is the capital of Myanmar.",
+    )
+
+    assert model.called is True
+    assert out == "Dili, Naypyidaw"
+
+
+def test_answer_contract_skips_unambiguous_scalar_answer():
+    from lilith_agent.runner import _apply_answer_contract
+
+    out = _apply_answer_contract(
+        _RaiseIfContractCalled(),
+        "What is 6*7?",
+        "42",
+        "",
+    )
+
+    assert out == "42"
+
+
+def test_answer_contract_skips_generic_which_question_without_type_marker():
+    from lilith_agent.runner import _apply_answer_contract
+
+    model = _FakeContractModel('{"status":"ok"}')
+
+    out = _apply_answer_contract(
+        model,
+        "Which mountain is the tallest?",
+        "Mount Everest",
+        "Mount Everest is the tallest mountain.",
+    )
+
+    assert model.called is False
+    assert out == "Mount Everest"
+
+
+def test_answer_contract_marker_matching_avoids_word_internal_false_positive():
+    from lilith_agent.runner import _apply_answer_contract
+
+    model = _FakeContractModel('{"status":"ok"}')
+
+    out = _apply_answer_contract(
+        model,
+        "Which candidate won the race?",
+        "Alice",
+        "Alice won the race.",
+    )
+
+    assert model.called is False
+    assert out == "Alice"
+
+
+def test_give_up_recovery_uses_supported_trace_answer():
+    from lilith_agent.runner import _apply_give_up_recovery
+
+    model = _FakeContractModel('{"status":"answer","submitted_answer":"Citations"}')
+
+    out = _apply_give_up_recovery(
+        model,
+        "What is the exact UI label?",
+        "unknown",
+        "Evidence gathered from the page: the exact UI label is Citations.",
+    )
+
+    assert model.called is True
+    assert out == "Citations"
+
+
+def test_give_up_recovery_rejects_unsupported_answer():
+    from lilith_agent.runner import _apply_give_up_recovery
+
+    model = _FakeContractModel('{"status":"answer","submitted_answer":"Downloads"}')
+
+    out = _apply_give_up_recovery(
+        model,
+        "What is the exact UI label?",
+        "unknown",
+        "Evidence gathered from the page: the exact UI label is Citations.",
+    )
+
+    assert model.called is True
+    assert out == "unknown"
+
+
+def test_give_up_recovery_skips_confident_answer():
+    from lilith_agent.runner import _apply_give_up_recovery
+
+    out = _apply_give_up_recovery(
+        _RaiseIfContractCalled(),
+        "What is the exact UI label?",
+        "Citations",
+        "Evidence gathered from the page: the exact UI label is Citations.",
+    )
+
+    assert out == "Citations"
+
+
+def test_runner_applies_gaia_submission_normalizer(tmp_path: Path):
+    answers = run_agent_on_questions(
+        _GraphReturnsAssignmentAnswer(),
+        [{"task_id": "task-normalize", "question": "What is x?"}],
+        tmp_path,
+    )
+
+    assert answers == [{"task_id": "task-normalize", "submitted_answer": "563.9"}]
+    checkpoint = json.loads((tmp_path / "task-normalize.json").read_text())
+    assert checkpoint["submitted_answer"] == "563.9"
+
+
+def test_runner_applies_answer_contract_repair(monkeypatch, tmp_path: Path):
+    model = _FakeContractModel('{"status":"repair","submitted_answer":"Timor-Leste, Myanmar"}')
+    monkeypatch.setattr("lilith_agent.models.get_cheap_model", lambda cfg: model)
+
+    answers = run_agent_on_questions(
+        _GraphReturnsWrongTypeWithEvidence(),
+        [{"task_id": "task-contract", "question": "What countries have the capitals Dili and Naypyidaw?"}],
+        tmp_path,
+    )
+
+    assert model.called is True
+    assert answers == [{"task_id": "task-contract", "submitted_answer": "Timor-Leste, Myanmar"}]
+    checkpoint = json.loads((tmp_path / "task-contract.json").read_text())
+    assert checkpoint["submitted_answer"] == "Timor-Leste, Myanmar"
+
+
+def test_runner_applies_give_up_recovery(monkeypatch, tmp_path: Path):
+    model = _FakeContractModel('{"status":"answer","submitted_answer":"Citations"}')
+    monkeypatch.setattr("lilith_agent.models.get_cheap_model", lambda cfg: model)
+
+    answers = run_agent_on_questions(
+        _GraphReturnsUnknownWithEvidence(),
+        [{"task_id": "task-recovery", "question": "What is the exact UI label?"}],
+        tmp_path,
+    )
+
+    assert model.called is True
+    assert answers == [{"task_id": "task-recovery", "submitted_answer": "Citations"}]
+    checkpoint = json.loads((tmp_path / "task-recovery.json").read_text())
+    assert checkpoint["submitted_answer"] == "Citations"
 
 
 def test_runner_pauses_batch_when_window_trips(monkeypatch, tmp_path: Path):
