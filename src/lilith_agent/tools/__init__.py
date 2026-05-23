@@ -62,6 +62,8 @@ def build_tools(cfg: Config) -> list[BaseTool]:
         - To PERSIST output the user can see, call `write_file` — do NOT try to
           write from inside `run_python`.
 
+        STATELESS EXECUTION: The Python environment resets on every call! Functions, variables, or state created in one `run_python` call DO NOT persist to the next. If you need to reuse code or state, you must pass it back into the next script.
+
         AVAILABLE LIBRARIES: requests, beautifulsoup4 (bs4), pandas, trafilatura, openpyxl, faster-whisper, pypdf.
         CRITICAL: If you use this tool to scrape websites, you MUST include a 'User-Agent' header.
         Example: headers = {'User-Agent': 'Mozilla/5.0...'}

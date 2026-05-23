@@ -687,15 +687,20 @@ def _final_formatting_cleanup(
     log.info("formatter: invoking LLM, in_len=%d", len(determ))
 
     instructions = (
-        "You are a benchmark scoring assistant. Your task is to extract the EXACT answer "
+        "You are a strict benchmark scoring assistant. Your ONLY job is to extract the EXACT final answer "
         "from a researcher's conclusion based on strict formatting rules.\n\n"
-        "SCORING RULES:\n"
-        "1. Remove all conversational filler (e.g., 'The answer is...', 'Based on...', 'I found...').\n"
-        "2. Strip all reasoning, context, and explanations. Output ONLY the core value.\n"
+        "CRITICAL SCORING RULES:\n"
+        "1. Remove ALL conversational filler, narrative text, or explanations (e.g., 'The answer is...', 'Based on...', 'I found...', 'The value is').\n"
+        "2. Output ONLY the core value. NOT A FULL SENTENCE. NO EXPLANATIONS. NO ADDITIONAL CONTEXT.\n"
         "3. If the answer is a location, remove scene descriptors (INT., EXT., - DAY).\n"
         "4. Strip all trailing punctuation (., !).\n"
-        "5. Honor requested units (e.g., if asked 'how many thousands', '3000' becomes '3').\n"
-        "6. Output ONLY the bare text of the answer. No intro, no outro."
+        "5. Honor requested units carefully.\n"
+        "6. Output ONLY the bare text of the answer. No intro, no outro, no reasoning.\n"
+        "7. STRICT MATH & PRECISION: If the question requires a specific number of decimal places or rounding, you MUST strictly apply it exactly as the Original Question specifies.\n"
+        "8. ANTI-AUTOCORRECT (CRITICAL): NEVER correct spelling, grammar, or typos from the Researcher's Conclusion. If the conclusion contains 'Ploybius', you MUST output 'Ploybius'. Do not fix it to 'Polybius'. Preserve the conclusion's spelling verbatim.\n"
+        "9. EXACT ENTITY NAMING: Do not expand, formalize, or translate names. If the conclusion uses a common name (e.g., 'Brunei'), DO NOT output the official state name ('Brunei Darussalam'). Match the conclusion's form.\n"
+        "10. STRIP VARIABLES: If the question asks for a mathematical value, output JUST the number. If the conclusion says 'x = 2', 'x_2', or 'The value is 2', output ONLY '2'.\n"
+        "11. EXACT PRECISION (NO ROUNDING): Do not round numbers, alter decimal places, or change units unless the Original Question explicitly instructs. If the conclusion is '1.456', do not round to '1.46'."
     )
 
     prompt = (

@@ -122,11 +122,31 @@ python scripts/dev_run_gaia.py --split test --level 1 --limit 5
 ### Build a leaderboard submission
 
 ```bash
-python scripts/build_leaderboard_submission.py --split test --out submission.jsonl
+python scripts/build_leaderboard_submission.py --split test --out submission.jsonl --pad-missing
 # Upload submission.jsonl to https://huggingface.co/spaces/gaia-benchmark/leaderboard/submit
 ```
 
-Per-question checkpoints land in `.checkpoints/<task_id>.json` — delete one to force a rerun.
+Per-question checkpoints land in `.checkpoints/<task_id>.json`. Reruns skip existing checkpoints by default. To overwrite fresh answers, use `--force` on the selected scope:
+
+```bash
+# Rerun and overwrite one task.
+python scripts/dev_run_gaia.py --split test --task-id <task_id> --force
+
+# Rerun and overwrite all level-one test tasks.
+python scripts/dev_run_gaia.py --split test --level 1 --limit -1 --force
+```
+
+After any rerun, rebuild `submission.jsonl`; the builder reads the latest checkpoint files. The GAIA leaderboard expects the full test split: 93 level-1 rows, 159 level-2 rows, and 49 level-3 rows. Use `--pad-missing` so unanswered tasks are emitted as blank placeholders and the file has the required 301 rows:
+
+```bash
+python scripts/build_leaderboard_submission.py \
+  --checkpoint-dir .checkpoints \
+  --split test \
+  --out submission.jsonl \
+  --pad-missing
+
+wc -l submission.jsonl  # should print 301
+```
 
 ## Tools
 

@@ -13,3 +13,8 @@ anatomy_full.pdf
 .pycache/*
 .worktrees/
 __pycache__/*
+AGENTS.md
+gaia_eval_dashboard.html
+.claude/
+.codegraph/
+.cursor/
