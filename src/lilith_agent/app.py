@@ -690,17 +690,25 @@ def build_react_agent(cfg: Config):
             "or on-screen phrases. Use search snippets, cached transcripts in Hugging Face Spaces/datasets, and reliable web "
             "pages as evidence. For visual questions, try `youtube_frame_at` only when a timestamp is needed; if video download "
             "is blocked, pivot to title/time/object searches and answer from the strongest available evidence.\n"
-            "9. FORMAT COMPLIANCE (BENCHMARK MODE): Before you emit 'Final Answer:', reread the question's last "
+            "9. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. "
+            "If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), "
+            "you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
+            "10. FORMAT COMPLIANCE (BENCHMARK MODE): Before you emit 'Final Answer:', reread the question's last "
             "sentence verbatim and treat it as a hard contract. You are a data-extraction engine, not a chatbot. "
             "If the question says 'first name', output ONE word — the given name only. If it says 'surname' or "
             "'last name', output ONE word — the family name only. If it says 'single word' or 'one word', output "
             "ONE word with no punctuation, no quotes, no speaker prefix. If it says 'comma-separated' or "
             "'alphabetized list', output items joined by ', ' with no prose. If it asks for a number, output "
             "digits only — no units, no commas — unless units are explicitly requested. Strip ALL leading prose "
+<<<<<<< HEAD
             "(e.g. 'The answer is', 'He said', character names, quotation marks). Constraint compliance beats "
             "completeness: an over-long answer is wrong, not safer."
             "10. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
             "11. FINAL ANSWER FORMAT: When you have the final answer, output ONLY the value itself. Do not say 'The answer is...', do not provide explanations in your final output. Just output the bare minimum exact string, number, or list."
+=======
+            "(e.g. 'The answer is', 'He said', character names, quotation marks). Output only the bare minimum "
+            "exact string, number, or list. Constraint compliance beats completeness: an over-long answer is wrong, not safer."
+>>>>>>> 82a65e3 (feat: improve agent precision and formatting rules)
         )
         
         if memory_context:
