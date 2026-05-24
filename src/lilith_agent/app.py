@@ -80,6 +80,7 @@ _FAIL_SAFE_RECURSION_HEADROOM = 4
 _SUPERVISOR_MIN_TOOL_CALLS = 5
 _SUPERVISOR_RECENT_MESSAGES = 12
 _SUPERVISOR_REVIEW_MAX = 3
+_SUPERVISOR_MAX_NUDGES = 5
 
 
 _RESPONSE_METADATA_NOISE_KEYS = frozenset({
@@ -828,6 +829,12 @@ def build_react_agent(cfg: Config):
         return {"messages": [response]}
 
     def supervisor_node(state):
+        if state.get("supervisor_nudges", 0) >= _SUPERVISOR_MAX_NUDGES:
+            return {
+                "supervisor_decision": "finalize",
+                "supervisor_best_answer": state.get("supervisor_best_answer", ""),
+                "supervisor_guidance": "Nudge cap reached. Commit to best available answer.",
+            }
         tool_calls_this_turn = _count_tool_calls_since_last_human(state["messages"])
         if supervisor_model is None or tool_calls_this_turn < _SUPERVISOR_MIN_TOOL_CALLS:
             return {
@@ -847,8 +854,9 @@ def build_react_agent(cfg: Config):
             "Return ONLY JSON with keys status, best_answer, guidance. "
             "status must be continue, nudge, or finalize. Use nudge when evidence likely supports "
             "an answer but one more agent turn is acceptable. Use finalize only when a concrete "
-            "submit-ready answer is available or the evidence is conclusive. A prior nudge alone is "
-            "not a reason to finalize. Never put placeholder values like unknown, n/a, none, or not "
+            "submit-ready answer is available or the evidence is conclusive. If you have already nudged "
+            "five times and the agent has not improved, use finalize to force termination — do not nudge "
+            "repeatedly. Never put placeholder values like unknown, n/a, none, or not "
             "sure in best_answer. If no concrete submit-ready answer is available, set best_answer "
             "to an empty string and use guidance to force the agent to make its best guess."
         )
@@ -863,8 +871,6 @@ def build_react_agent(cfg: Config):
         if _is_placeholder_answer(best_answer):
             print(f"[supervisor] discarded placeholder best_answer={best_answer[:80]!r}", flush=True)
             best_answer = ""
-        if status == "finalize" and state.get("supervisor_nudges", 0) > 0 and not best_answer:
-            status = "nudge"
         log.info(
             "[supervisor] status=%s best=%r guidance=%r",
             status,
