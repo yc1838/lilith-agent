@@ -700,15 +700,10 @@ def build_react_agent(cfg: Config):
             "ONE word with no punctuation, no quotes, no speaker prefix. If it says 'comma-separated' or "
             "'alphabetized list', output items joined by ', ' with no prose. If it asks for a number, output "
             "digits only — no units, no commas — unless units are explicitly requested. Strip ALL leading prose "
-<<<<<<< HEAD
             "(e.g. 'The answer is', 'He said', character names, quotation marks). Constraint compliance beats "
             "completeness: an over-long answer is wrong, not safer."
-            "10. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
-            "11. FINAL ANSWER FORMAT: When you have the final answer, output ONLY the value itself. Do not say 'The answer is...', do not provide explanations in your final output. Just output the bare minimum exact string, number, or list."
-=======
-            "(e.g. 'The answer is', 'He said', character names, quotation marks). Output only the bare minimum "
-            "exact string, number, or list. Constraint compliance beats completeness: an over-long answer is wrong, not safer."
->>>>>>> 82a65e3 (feat: improve agent precision and formatting rules)
+            "11. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
+            "12. FINAL ANSWER FORMAT: When you have the final answer, output ONLY the value itself. Do not say 'The answer is...', do not provide explanations in your final output. Just output the bare minimum exact string, number, or list."
         )
         
         if memory_context:
