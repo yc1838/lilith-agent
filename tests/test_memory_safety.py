@@ -1,8 +1,7 @@
 """Tests for memory safety guards: empty-list wipe prevention and ID stability."""
-import pytest
 from langchain_core.messages import HumanMessage
 
-from lilith_agent.memory import MemoryStore, MIN_MESSAGES_FOR_EXTRACTION, ephemeral_memory
+from lilith_agent.memory import MemoryStore, MIN_MESSAGES_FOR_EXTRACTION
 
 
 class _FakeEpisodeModel:

@@ -1,12 +1,12 @@
-import os
+import sqlite3
+from datetime import datetime
+
 from lilith_agent.memory import _store, retrieve_relevant_context
 
 # Initialize DB via _store
 _store._init_db()
 
 # Manually inject
-from datetime import datetime
-import sqlite3
 conn = sqlite3.connect(str(_store.db_path))
 with conn:
     conn.execute("DELETE FROM memories")

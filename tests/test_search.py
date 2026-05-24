@@ -14,6 +14,21 @@ def test_web_search_empty_without_tavily_key_includes_recovery_hint(monkeypatch)
     assert "archive.org" in lower or "arxiv" in lower or "crossref" in lower
 
 
+def test_web_search_prints_query_provider_and_result_preview(monkeypatch, capsys):
+    monkeypatch.setattr(
+        search_mod,
+        "_ddg_search",
+        lambda q, n: "- Result Title (https://example.com)\n  Useful snippet",
+    )
+
+    search_mod.web_search("moon landing transcript", api_key="", max_results=3)
+
+    printed = capsys.readouterr().out
+    assert "[web_search] start provider=duckduckgo query='moon landing transcript' max_results=3" in printed
+    assert "[web_search] provider=duckduckgo status=success chars=" in printed
+    assert "Result Title" in printed
+
+
 def test_web_search_empty_with_tavily_failure_includes_recovery_hint(monkeypatch):
     monkeypatch.setattr(search_mod, "_ddg_search", lambda q, n: "No results.")
 

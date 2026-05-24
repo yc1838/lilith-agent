@@ -66,6 +66,10 @@ _PRECISION_WORDS = {
     "tenth": 1, "hundredth": 2, "thousandth": 3,
     "ten-thousandth": 4, "ten thousandth": 4,
 }
+_ABBREV_NO_STRIP = frozenset({
+    "mr", "mrs", "ms", "dr", "st", "jr", "sr",
+    "etc", "inc", "ltd", "ave", "blvd", "rev", "hon", "esq", "vs", "co",
+})
 def _required_decimal_places(question: str) -> int | None:
     """Return the number of decimal places the question demands, or None."""
     m = _DECIMAL_PLACES_RE.search(question)
@@ -189,6 +193,17 @@ def _expand_to_source_token(source: str, cleaned: str) -> str | None:
     return token or None
 
 
+def _strip_trailing_sentence_punct(s: str) -> str:
+    if len(s) < 2 or s[-1] not in {".", "!"}:
+        return s
+    body = s[:-1]
+    if not body.isalpha():
+        return s
+    if body.lower() in _ABBREV_NO_STRIP:
+        return s
+    return body
+
+
 def _normalize_gaia_submission(question: str, answer: str) -> str:
     s = _deterministic_format(answer).strip()
     if s.startswith("**"):
@@ -215,6 +230,8 @@ def _normalize_gaia_submission(question: str, answer: str) -> str:
     required_places = _required_decimal_places(question)
     if required_places is not None and _SCALAR_NUMBER.fullmatch(s):
         s = _apply_decimal_precision(s, required_places)
+
+    s = _strip_trailing_sentence_punct(s)
 
     return s
 

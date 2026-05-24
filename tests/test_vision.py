@@ -1,14 +1,19 @@
 import os
+
 import pytest
 from dotenv import load_dotenv
 
-# Load .env before evaluating anything
-load_dotenv(override=True)
-
 from lilith_agent.config import Config
-from lilith_agent.gaia_dataset import GaiaDatasetClient
 from lilith_agent.tools.vision import inspect_visual_content
 
+# Load .env before evaluating test configuration.
+load_dotenv(override=True)
+
+
+@pytest.mark.skipif(
+    os.getenv("GAIA_RUN_LIVE_VISION_TESTS") != "1" or not os.getenv("GAIA_FAL_VISION_API_KEY"),
+    reason="live FAL vision integration requires GAIA_RUN_LIVE_VISION_TESTS=1 and GAIA_FAL_VISION_API_KEY",
+)
 def test_fal_vision_integration(tmp_path):
     """
     Test the FAL vision integration using GAIA task 8f80e01c-1296-4371-9486-bb3d68651a60.

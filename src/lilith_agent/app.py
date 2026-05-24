@@ -12,8 +12,13 @@ from langchain_core.tools import BaseTool
 import os
 from pathlib import Path
 from langgraph.graph import END, StateGraph
-from langgraph.graph.message import MessagesState, add_messages
+from langgraph.graph.message import add_messages
 from typing import Annotated, TypedDict
+
+from lilith_agent.config import Config
+from lilith_agent.checkpointing import build_checkpointer
+from lilith_agent.models import get_cheap_model, get_extra_strong_model
+
 
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
@@ -23,11 +28,8 @@ class AgentState(TypedDict):
     supervisor_decision: str
     supervisor_best_answer: str
     supervisor_guidance: str
+    supervisor_review_count: int
 
-
-from lilith_agent.config import Config
-from lilith_agent.checkpointing import build_checkpointer
-from lilith_agent.models import get_cheap_model, get_extra_strong_model
 
 log = logging.getLogger(__name__)
 # Per-node child loggers so the logger-name column reads `lilith_agent.nodes.X`
@@ -77,6 +79,7 @@ _DEFAULT_COOLDOWN_LIMIT = 3
 _FAIL_SAFE_RECURSION_HEADROOM = 4
 _SUPERVISOR_MIN_TOOL_CALLS = 5
 _SUPERVISOR_RECENT_MESSAGES = 12
+_SUPERVISOR_REVIEW_MAX = 3
 
 
 _RESPONSE_METADATA_NOISE_KEYS = frozenset({
@@ -114,6 +117,82 @@ def _message_text(content) -> str:
             for part in content
         )
     return str(content or "")
+
+
+_PLACEHOLDER_ANSWERS = frozenset({
+    "unknown",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "not sure",
+    "unsure",
+    "undetermined",
+    "cannot determine",
+    "can't determine",
+    "i don't know",
+    "no answer",
+})
+
+
+def _is_placeholder_answer(answer: str) -> bool:
+    normalized = re.sub(r"[\s\W_]+", " ", str(answer or "").strip().lower()).strip()
+    return normalized in _PLACEHOLDER_ANSWERS
+
+
+_FORMAT_TRIGGERS = re.compile(
+    r"\b(only the first name|first name only|give only the first|just the first name|"
+    r"surname|last name only|give only the surname|single word|one word|"
+    r"in alphabetical order|alphabetized|comma[-\s]separated|comma[-\s]delimited|"
+    r"without (?:any )?(?:punctuation|units|prefix|suffix|abbreviation)|"
+    r"no (?:units|prefix|suffix|abbreviation|punctuation)|"
+    r"number only|numeric only|digits only|integer only|"
+    r"give only|just give|give just|provide only)\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_format_strip(question: str) -> bool:
+    return bool(_FORMAT_TRIGGERS.search(question or ""))
+
+
+def _strip_to_format(question: str, candidate: str, cheap_model) -> str:
+    """Re-emit candidate trimmed to satisfy a stated output-format constraint.
+    Returns the original candidate on any failure."""
+    try:
+        prompt = (
+            "You are a strict format-extraction engine, not a chatbot. "
+            "Input: a benchmark question and a candidate answer. "
+            "Output: the candidate rewritten to satisfy the question's output-format constraint EXACTLY. "
+            "Rules:\n"
+            "- 'first name' / 'given name' => output ONE word (the given name only, drop surname).\n"
+            "- 'surname' / 'last name' => output ONE word (the surname only, drop given name).\n"
+            "- 'single word' / 'one word' => output ONE word, no punctuation, no quotes.\n"
+            "- 'number' / 'numeric' / 'digits only' / 'integer' => output digits only, no units, no commas, "
+            "unless the question explicitly asks for units.\n"
+            "- 'comma-separated' / 'comma-delimited' / 'alphabetized list' => output items joined by ', ' "
+            "with no prose, no leading/trailing punctuation.\n"
+            "- Strip leading prose: 'The answer is', 'He said', character/speaker names, quotation marks, "
+            "trailing periods unless the answer is a sentence.\n"
+            "- Preserve the candidate's facts; only adjust formatting/trimming. Do NOT change which entity "
+            "or value is named.\n"
+            "Output: the rewritten answer ONLY. No labels, no explanation, no quotes."
+        )
+        try:
+            invoker = cheap_model.bind(temperature=0)
+        except Exception:
+            invoker = cheap_model
+        resp = invoker.invoke([
+            SystemMessage(content=prompt),
+            HumanMessage(content=f"Question: {question}\nCandidate: {candidate}"),
+        ])
+        text = _message_text(getattr(resp, "content", "")).strip()
+        text = text.strip("\"' \n\t")
+        if text and not _is_placeholder_answer(text):
+            return text
+    except Exception as exc:
+        log.warning("[supervisor_finalizer] format strip failed: %s", exc)
+    return candidate
 
 
 def _parse_supervisor_decision(content) -> dict:
@@ -304,7 +383,9 @@ def _route_after_model(
 
     Returns "fail_safe" when the per-question tool-call budget is exhausted or when
     iterations are within two of the LangGraph recursion limit; "tools" when the last
-    AIMessage has tool_calls; otherwise END.
+    AIMessage has tool_calls; "supervisor_review" when the last AIMessage carries a
+    'Final Answer:' candidate that has not been pre-approved by the supervisor;
+    otherwise END.
     """
     if state.get("iterations", 0) >= recursion_limit - 2:
         print(
@@ -322,7 +403,16 @@ def _route_after_model(
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
         return "tools"
+    if isinstance(last, AIMessage) and _has_final_answer(getattr(last, "content", "")):
+        return "supervisor_review"
     return "extract_memory"
+
+
+_FINAL_ANSWER_RE = re.compile(r"(?i)\bfinal\s+answer\s*:")
+
+
+def _has_final_answer(content) -> bool:
+    return bool(_FINAL_ANSWER_RE.search(_message_text(content)))
 
 
 def _build_tool_node(
@@ -405,7 +495,11 @@ def _build_tool_node(
                         if score > best_score:
                             best_prior, best_score = prior_q, score
                     if best_score >= semantic_dedup_threshold:
-                        print(f"[tools] semantic_dedup score={best_score:.2f} tool={name}", flush=True)
+                        print(
+                            f"[tools] semantic_dedup score={best_score:.2f} tool={name} "
+                            f"query={q!r} prior_query={best_prior!r}",
+                            flush=True,
+                        )
                         log.info("[semantic_dedup] %.2f match vs prior: %r ~ %r", best_score, q, best_prior)
                         results.append(ToolMessage(
                             tool_call_id=tc_id,
@@ -534,11 +628,7 @@ def build_react_agent(cfg: Config):
 
     base_model = get_extra_strong_model(cfg)
     model = base_model.bind_tools(tools)
-    try:
-        supervisor_model = get_cheap_model(cfg)
-    except Exception as exc:
-        log.warning("[supervisor] cheap model unavailable; disabled: %s", exc)
-        supervisor_model = None
+    supervisor_model = base_model
     summarize_fn = _make_tool_result_summarizer(cfg) if cfg.compact_summarize else None
 
     def _initial_question_from_state(state) -> str:
@@ -595,8 +685,26 @@ def build_react_agent(cfg: Config):
             "If `find_files` returns 'No files found' for an exact filename, do NOT escalate to `find_files(root='/')` — "
             "broaden instead: `grep` for a substring, `find_files` with a shorter/partial name, or `ls` the parent "
             "directory to see what's actually there. User filename references may be casual or imprecise (e.g. `.lol` in chat is often laughter, not an extension).\n"
-            "8. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
-            "9. FINAL ANSWER FORMAT: When you have the final answer, output ONLY the value itself. Do not say 'The answer is...', do not provide explanations in your final output. Just output the bare minimum exact string, number, or list."
+            "8. YOUTUBE FALLBACK STRATEGY: First try `youtube_transcript` for spoken captions. If it is blocked, unavailable, "
+            "or says YouTube is blocking requests, do not repeatedly retry transcript or yt-dlp. Extract the video ID and "
+            "search for `\"<video id>\" transcript`, `\"<video id>\"`, the exact video title, and distinctive quoted dialogue "
+            "or on-screen phrases. Use search snippets, cached transcripts in Hugging Face Spaces/datasets, and reliable web "
+            "pages as evidence. For visual questions, try `youtube_frame_at` only when a timestamp is needed; if video download "
+            "is blocked, pivot to title/time/object searches and answer from the strongest available evidence.\n"
+            "9. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. "
+            "If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), "
+            "you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
+            "10. FORMAT COMPLIANCE (BENCHMARK MODE): Before you emit 'Final Answer:', reread the question's last "
+            "sentence verbatim and treat it as a hard contract. You are a data-extraction engine, not a chatbot. "
+            "If the question says 'first name', output ONE word — the given name only. If it says 'surname' or "
+            "'last name', output ONE word — the family name only. If it says 'single word' or 'one word', output "
+            "ONE word with no punctuation, no quotes, no speaker prefix. If it says 'comma-separated' or "
+            "'alphabetized list', output items joined by ', ' with no prose. If it asks for a number, output "
+            "digits only — no units, no commas — unless units are explicitly requested. Strip ALL leading prose "
+            "(e.g. 'The answer is', 'He said', character names, quotation marks). Constraint compliance beats "
+            "completeness: an over-long answer is wrong, not safer."
+            "11. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
+            "12. FINAL ANSWER FORMAT: When you have the final answer, output ONLY the value itself. Do not say 'The answer is...', do not provide explanations in your final output. Just output the bare minimum exact string, number, or list."
         )
         
         if memory_context:
@@ -694,7 +802,29 @@ def build_react_agent(cfg: Config):
         )
         compacted = _compact_old_tool_messages(state["messages"], summarize_fn=summarize_fn)
         response = base_model.invoke([SystemMessage(sys_prompt)] + compacted)
-        print(f"[fail_safe] produced content={_message_text(getattr(response, 'content', ''))[:240]!r}", flush=True)
+        content_text = _message_text(getattr(response, "content", "")).strip()
+
+        if not content_text or "final answer" not in content_text.lower():
+            best_answer = str(state.get("supervisor_best_answer", "") or "").strip()
+            if best_answer and not _is_placeholder_answer(best_answer):
+                response = AIMessage(content=f"Final Answer: {best_answer}")
+                content_text = response.content
+                print(
+                    f"[fail_safe] empty/missing-final-answer; using supervisor_best_answer={best_answer[:160]!r}",
+                    flush=True,
+                )
+            else:
+                fallback = (
+                    "Final Answer: I cannot determine the answer from the available evidence."
+                )
+                response = AIMessage(content=fallback)
+                content_text = fallback
+                print(
+                    "[fail_safe] empty/missing-final-answer; no supervisor_best_answer; using descriptive default",
+                    flush=True,
+                )
+
+        print(f"[fail_safe] produced content={content_text[:240]!r}", flush=True)
         return {"messages": [response]}
 
     def supervisor_node(state):
@@ -712,12 +842,15 @@ def build_react_agent(cfg: Config):
             name = getattr(msg, "name", "") or msg.__class__.__name__
             rendered.append(f"{name}: {_message_text(getattr(msg, 'content', ''))[:1200]}")
         prompt = (
-            "You are a cheap supervisor for a benchmark ReAct agent. Decide whether the agent "
+            "You are a high-precision supervisor for a benchmark ReAct agent. Decide whether the agent "
             "already has enough evidence to answer or is repeating low-value tool work. "
             "Return ONLY JSON with keys status, best_answer, guidance. "
             "status must be continue, nudge, or finalize. Use nudge when evidence likely supports "
-            "an answer but one more agent turn is acceptable. Use finalize when the agent was already "
-            "nudged or the evidence is conclusive."
+            "an answer but one more agent turn is acceptable. Use finalize only when a concrete "
+            "submit-ready answer is available or the evidence is conclusive. A prior nudge alone is "
+            "not a reason to finalize. Never put placeholder values like unknown, n/a, none, or not "
+            "sure in best_answer. If no concrete submit-ready answer is available, set best_answer "
+            "to an empty string and use guidance to force the agent to make its best guess."
         )
         response = supervisor_model.invoke([
             SystemMessage(content=prompt),
@@ -727,8 +860,11 @@ def build_react_agent(cfg: Config):
         status = decision["status"]
         best_answer = decision.get("best_answer", "")
         guidance = decision.get("guidance", "")
-        if status == "nudge" and state.get("supervisor_nudges", 0) > 0:
-            status = "finalize"
+        if _is_placeholder_answer(best_answer):
+            print(f"[supervisor] discarded placeholder best_answer={best_answer[:80]!r}", flush=True)
+            best_answer = ""
+        if status == "finalize" and state.get("supervisor_nudges", 0) > 0 and not best_answer:
+            status = "nudge"
         log.info(
             "[supervisor] status=%s best=%r guidance=%r",
             status,
@@ -746,9 +882,14 @@ def build_react_agent(cfg: Config):
         }
         if status == "nudge":
             update["supervisor_nudges"] = state.get("supervisor_nudges", 0) + 1
+            best_answer_clause = (
+                f"Best current answer: {best_answer}. "
+                if best_answer
+                else "No concrete best answer was identified yet. Make the strongest best guess from existing evidence. "
+            )
             update["messages"] = [SystemMessage(content=(
                 "SUPERVISOR: Evidence suggests you may already be able to answer. "
-                f"Best current answer: {best_answer or 'unknown'}. "
+                f"{best_answer_clause}"
                 f"Guidance: {guidance or 'Stop exploring unless a specific missing fact remains.'} "
                 "If no specific missing fact remains, provide Final Answer now."
             ))]
@@ -756,7 +897,20 @@ def build_react_agent(cfg: Config):
 
     def supervisor_finalizer_node(state):
         best_answer = str(state.get("supervisor_best_answer", "") or "").strip()
-        if best_answer:
+        if best_answer and not _is_placeholder_answer(best_answer):
+            original_question = _initial_question_from_state(state)
+            if _needs_format_strip(original_question):
+                try:
+                    cheap = get_cheap_model(cfg)
+                    stripped = _strip_to_format(original_question, best_answer, cheap)
+                    if stripped and stripped != best_answer:
+                        print(
+                            f"[supervisor_finalizer] format-strip {best_answer[:80]!r} -> {stripped[:80]!r}",
+                            flush=True,
+                        )
+                        best_answer = stripped
+                except Exception as exc:
+                    log.warning("[supervisor_finalizer] format strip skipped: %s", exc)
             print(f"[supervisor_finalizer] finalizing best={best_answer[:160]!r}", flush=True)
             return {"messages": [AIMessage(content=f"Final Answer: {best_answer}")]}
         guidance = str(state.get("supervisor_guidance", "") or "").strip()
@@ -766,6 +920,8 @@ def build_react_agent(cfg: Config):
             SystemMessage(content=(
                 "SUPERVISOR FINALIZER: Stop tool use. Answer the original question, not an intermediate hop. "
                 "Produce a bare final answer in 'Final Answer: ...' form using the existing evidence. "
+                "Do not answer unknown, n/a, none, or not sure. If evidence is imperfect, make the strongest "
+                "best guess supported by the transcript, search snippets, tool outputs, and prior reasoning. "
                 f"Original question: {original_question}\n"
                 f"Supervisor guidance: {guidance}"
             )),
@@ -773,6 +929,75 @@ def build_react_agent(cfg: Config):
         ])
         print(f"[supervisor_finalizer] produced content={_message_text(getattr(response, 'content', ''))[:240]!r}", flush=True)
         return {"messages": [response]}
+
+    def supervisor_review_node(state):
+        review_count = state.get("supervisor_review_count", 0)
+        prior_supervisor = state.get("supervisor_decision") or ""
+        if supervisor_model is None or review_count >= _SUPERVISOR_REVIEW_MAX:
+            print(
+                f"[supervisor_review] auto-approve review_count={review_count} "
+                f"reason={'no_model' if supervisor_model is None else 'cap'}",
+                flush=True,
+            )
+            return {"supervisor_review_count": review_count + 1}
+        if prior_supervisor in {"nudge", "finalize"}:
+            print(
+                f"[supervisor_review] skip reason=supervisor_recent_decision={prior_supervisor}",
+                flush=True,
+            )
+            return {"supervisor_review_count": review_count + 1}
+
+        last = state["messages"][-1]
+        candidate = _message_text(getattr(last, "content", ""))[:1200]
+
+        recent_messages = state["messages"][-_SUPERVISOR_RECENT_MESSAGES:]
+        rendered = []
+        for msg in recent_messages:
+            name = getattr(msg, "name", "") or msg.__class__.__name__
+            rendered.append(f"{name}: {_message_text(getattr(msg, 'content', ''))[:1200]}")
+
+        prompt = (
+            "FINAL ANSWER REVIEW. The agent has produced a candidate Final Answer for a benchmark "
+            "question. Decide whether to approve it as-is or send it back for revision. "
+            "Return ONLY JSON with keys status, best_answer, guidance. "
+            "status must be 'finalize' (approve) or 'nudge' (reject and request revision). "
+            "Reject only when the candidate has a concrete defect: violates a stated constraint, "
+            "is a placeholder (unknown, n/a, none, not sure), uses the wrong format, or contradicts "
+            "evidence in the transcript. Otherwise approve. Never put placeholder values in best_answer. "
+            f"Candidate Final Answer: {candidate}"
+        )
+        response = supervisor_model.invoke([
+            SystemMessage(content=prompt),
+            HumanMessage(content="\n\n".join(rendered)),
+        ])
+        decision = _parse_supervisor_decision(getattr(response, "content", ""))
+        status = decision["status"]
+        guidance = decision.get("guidance", "")
+        best_answer = decision.get("best_answer", "")
+        if _is_placeholder_answer(best_answer):
+            best_answer = ""
+
+        print(
+            f"[supervisor_review] status={status} count={review_count + 1} "
+            f"guidance={guidance[:160]!r}",
+            flush=True,
+        )
+
+        if status != "nudge":
+            return {"supervisor_review_count": review_count + 1}
+
+        revision_msg = SystemMessage(content=(
+            "FINAL ANSWER REVIEW FAILED: The previous Final Answer was rejected by the supervisor. "
+            f"Reason: {guidance or 'No specific guidance provided.'} "
+            + (f"Stronger candidate: {best_answer}. " if best_answer else "")
+            + "Re-examine the question and the evidence in this transcript and produce a corrected "
+            "Final Answer. If you need more evidence, call tools; otherwise output the corrected "
+            "Final Answer directly."
+        ))
+        return {
+            "supervisor_review_count": review_count + 1,
+            "messages": [revision_msg],
+        }
 
     def extract_memory_node(state):
         from lilith_agent.memory import extract_and_compress_facts, MIN_MESSAGES_FOR_EXTRACTION
@@ -794,6 +1019,7 @@ def build_react_agent(cfg: Config):
     graph.add_node("tools", tool_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("supervisor_finalizer", supervisor_finalizer_node)
+    graph.add_node("supervisor_review", supervisor_review_node)
     graph.add_node("fail_safe", fail_safe_node)
     graph.add_node("extract_memory", extract_memory_node)
 
@@ -804,20 +1030,50 @@ def build_react_agent(cfg: Config):
             budget_hard_cap=cfg.budget_hard_cap,
         )
 
+    def _route_after_review(state) -> str:
+        last = state["messages"][-1]
+        if isinstance(last, SystemMessage) and "FINAL ANSWER REVIEW FAILED" in _message_text(
+            getattr(last, "content", "")
+        ):
+            return "model"
+        return "extract_memory"
+
     graph.set_entry_point("model")
-    graph.add_conditional_edges("model", _router, {"tools": "tools", "fail_safe": "fail_safe", "extract_memory": "extract_memory"})
+    graph.add_conditional_edges(
+        "model",
+        _router,
+        {
+            "tools": "tools",
+            "fail_safe": "fail_safe",
+            "supervisor_review": "supervisor_review",
+            "extract_memory": "extract_memory",
+        },
+    )
     graph.add_edge("tools", "supervisor")
     graph.add_conditional_edges(
         "supervisor",
         lambda state: "supervisor_finalizer" if state.get("supervisor_decision") == "finalize" else "model",
         {"model": "model", "supervisor_finalizer": "supervisor_finalizer"},
     )
-    graph.add_edge("supervisor_finalizer", "extract_memory")
+    graph.add_conditional_edges(
+        "supervisor_review",
+        _route_after_review,
+        {"model": "model", "extract_memory": "extract_memory"},
+    )
+    graph.add_edge("supervisor_finalizer", "supervisor_review")
     graph.add_edge("fail_safe", "extract_memory")
     graph.add_edge("extract_memory", END)
 
     lilith_home = Path(os.getenv("LILITH_HOME", ".lilith"))
     memory_saver = build_checkpointer(lilith_home)
 
+    effective_recursion_limit = cfg.recursion_limit + cfg.budget_hard_cap + _FAIL_SAFE_RECURSION_HEADROOM
+    print(
+        f"[graph] effective_recursion_limit={effective_recursion_limit} "
+        f"logical_recursion_limit={cfg.recursion_limit} "
+        f"budget_hard_cap={cfg.budget_hard_cap} "
+        f"headroom={_FAIL_SAFE_RECURSION_HEADROOM}",
+        flush=True,
+    )
     compiled = graph.compile(checkpointer=memory_saver)
-    return compiled.with_config({"recursion_limit": cfg.recursion_limit + cfg.budget_hard_cap + _FAIL_SAFE_RECURSION_HEADROOM})
+    return compiled.with_config({"recursion_limit": effective_recursion_limit})

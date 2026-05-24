@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -99,6 +100,67 @@ class ScoringApiClientTests(unittest.TestCase):
         self.assertIn("429", client.last_warning or "")
         dataset_client.download_file.assert_called_once_with("task-123", Path(tmpdir))
 
+    def test_download_file_falls_back_to_dataset_on_404(self) -> None:
+        response = Mock(status_code=404, headers={})
+        error = requests.HTTPError("Not Found", response=response)
+        response.raise_for_status.side_effect = error
+
+        session = Mock()
+        session.get.return_value = response
+        dataset_client = Mock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fallback_path = Path(tmpdir) / "from-dataset.png"
+            fallback_path.write_bytes(b"image-bytes")
+            dataset_client.download_file.return_value = fallback_path
+
+            client = ScoringApiClient(
+                api_url="https://example.com",
+                session=session,
+                dataset_client=dataset_client,
+            )
+
+            with patch("builtins.print") as printed:
+                payload = client.download_file("task-404", tmpdir)
+
+        self.assertEqual(payload, fallback_path)
+        self.assertIn("404", client.last_warning or "")
+        dataset_client.download_file.assert_called_once_with("task-404", Path(tmpdir))
+        printed.assert_any_call(
+            "Scoring API unavailable while trying to download file for task-404 (status=404); falling back to GAIA dataset.",
+            flush=True,
+        )
+
+    def test_download_file_falls_back_when_api_returns_tiny_json_payload(self) -> None:
+        response = Mock(status_code=200, headers={"content-type": "application/json"})
+        response.content = b'{"detail":"file not found"}'
+        response.raise_for_status.return_value = None
+
+        session = Mock()
+        session.get.return_value = response
+        dataset_client = Mock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fallback_path = Path(tmpdir) / "from-dataset.png"
+            fallback_path.write_bytes(b"image-bytes")
+            dataset_client.download_file.return_value = fallback_path
+
+            client = ScoringApiClient(
+                api_url="https://example.com",
+                session=session,
+                dataset_client=dataset_client,
+            )
+
+            with patch("builtins.print") as printed:
+                payload = client.download_file("task-json", tmpdir)
+
+        self.assertEqual(payload, fallback_path)
+        dataset_client.download_file.assert_called_once_with("task-json", Path(tmpdir))
+        printed.assert_any_call(
+            "[scoring] invalid file payload task=task-json status=200 bytes=27 content_type='application/json'; trying dataset fallback",
+            flush=True,
+        )
+
     def test_default_dataset_client_is_built_lazily(self) -> None:
         session = Mock()
         response = Mock(status_code=429, headers={})
@@ -114,6 +176,24 @@ class ScoringApiClientTests(unittest.TestCase):
             client.get_questions()
 
         getter.assert_called_once_with()
+
+    def test_default_dataset_client_uses_validation_split(self) -> None:
+        dataset_instance = Mock()
+
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "lilith_agent.gaia_dataset.GaiaDatasetClient",
+            return_value=dataset_instance,
+        ) as dataset_client:
+            client = ScoringApiClient(api_url="https://example.com", session=Mock())
+            payload = client._get_dataset_client()
+
+        self.assertIs(payload, dataset_instance)
+        dataset_client.assert_called_once_with(
+            config="2023_all",
+            split="validation",
+            level=None,
+            token=None,
+        )
 
 
 if __name__ == "__main__":

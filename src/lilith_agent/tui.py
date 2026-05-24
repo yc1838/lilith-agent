@@ -1,15 +1,11 @@
 import sys
 import uuid
 from pathlib import Path
+
 from dotenv import load_dotenv
-
-env_path = Path(__file__).resolve().parent.parent.parent / ".env"
-load_dotenv(dotenv_path=env_path, override=True)
-
 from rich.console import Console
-from rich.panel import Panel
 from rich.markdown import Markdown
-from rich.align import Align
+from rich.panel import Panel
 from rich.live import Live
 from rich.spinner import Spinner
 from rich.theme import Theme
@@ -19,6 +15,9 @@ from prompt_toolkit.styles import Style
 from lilith_agent.config import Config
 from lilith_agent.app import build_react_agent
 from lilith_agent.observability import setup_logging, setup_arize, JsonlTraceCallback
+
+env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+load_dotenv(dotenv_path=env_path, override=True)
 
 custom_theme = Theme({
     "info": "dim cyan",

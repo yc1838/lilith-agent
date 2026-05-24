@@ -1,5 +1,3 @@
-import pytest
-from pathlib import Path
 import logging
 from lilith_agent.config import Config
 from lilith_agent.app import build_react_agent
@@ -48,7 +46,7 @@ def test_summarize_episode_stores_list_block_content_as_text(tmp_path, monkeypat
     assert episodes[0]["summary"] == "Captured lesson"
 
 
-def test_summarize_episode_logs_saved_episode_details(tmp_path, monkeypatch, caplog):
+def test_summarize_episode_prints_saved_episode_details(tmp_path, monkeypatch, caplog, capsys):
     from lilith_agent import memory
 
     class FakeModel:
@@ -63,6 +61,11 @@ def test_summarize_episode_logs_saved_episode_details(tmp_path, monkeypatch, cap
 
     with caplog.at_level(logging.INFO, logger="lilith_agent.memory"):
         memory.summarize_episode([HumanMessage(content="Find oldest Blu-Ray title")], FakeModel())
+
+    printed = capsys.readouterr().out
+    assert "[memory] Episode saved: task='Find oldest Blu-Ray title'" in printed
+    assert "outcome='success'" in printed
+    assert "summary='Used read_file successfully" in printed
 
     record = next(r for r in caplog.records if "[memory] Episode saved:" in r.message)
     assert "task='Find oldest Blu-Ray title'" in record.message

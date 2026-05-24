@@ -1,0 +1,15 @@
+[mcp_servers.codegraph]
+args = [
+    "serve",
+    "--mcp",
+]
+command = "codegraph"
+
+[mcp_servers.codegraph.tools.codegraph_status]
+approval_mode = "approve"
+
+[mcp_servers.codegraph.tools.codegraph_context]
+approval_mode = "approve"
+
+[mcp_servers.codegraph.tools.codegraph_explore]
+approval_mode = "approve"
