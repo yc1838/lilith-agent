@@ -251,7 +251,6 @@ def test_docker_integration_if_available(monkeypatch):
     This test is permissive: it skips if the image isn't built (common in CI).
     """
     import subprocess as sp
-    from lilith_agent.tools import python_exec as pe
 
     image = "lilith-pysandbox:latest"
     inspect = sp.run(

@@ -118,7 +118,7 @@ def fetch_url(url: str, max_chars: int = 8000, timeout: float = 60.0) -> str:
         if resp.status_code == 200 and len(resp.text) > 50:
             text = resp.text
             return text[:max_chars] if len(text) > max_chars else text
-    except Exception as e:
+    except Exception:
         # Silently fail Jina attempt and proceed to fallback
         pass
 

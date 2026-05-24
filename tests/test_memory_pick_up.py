@@ -1,4 +1,3 @@
-import os
 from lilith_agent.memory import _store, retrieve_relevant_context
 
 # Initialize DB via _store

@@ -4,7 +4,6 @@ from pathlib import Path
 import httpx
 from pypdf import PdfReader
 
-from lilith_agent.tools.vision import inspect_visual_content
 
 
 def inspect_pdf(url_or_path: str, query: str) -> str:

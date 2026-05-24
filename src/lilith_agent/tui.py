@@ -9,7 +9,6 @@ load_dotenv(dotenv_path=env_path, override=True)
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
-from rich.align import Align
 from rich.live import Live
 from rich.spinner import Spinner
 from rich.theme import Theme

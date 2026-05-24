@@ -102,7 +102,7 @@ except ImportError:
 if SQLiteCache:
     try:
         set_llm_cache(SQLiteCache(database_path=".langchain.db"))
-    except Exception as e:
+    except Exception:
         # Fail gracefully if sqlite is missing or DB file locked
         pass
 

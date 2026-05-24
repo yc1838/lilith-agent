@@ -40,7 +40,8 @@ def setup_arize(project_name: str = "lilith") -> bool:
     os.environ.setdefault("OTEL_EXPORTER_OTLP_TIMEOUT", "2")
     os.environ.setdefault("OTEL_BSP_EXPORT_TIMEOUT", "2000")
 
-    import contextlib, io
+    import contextlib
+    import io
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         tracer_provider = register(
             space_id=space_id,

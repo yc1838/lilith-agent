@@ -1,12 +1,10 @@
 import os
-import pytest
 from dotenv import load_dotenv
 
 # Load .env before evaluating anything
 load_dotenv(override=True)
 
 from lilith_agent.config import Config
-from lilith_agent.gaia_dataset import GaiaDatasetClient
 from lilith_agent.tools.vision import inspect_visual_content
 
 def test_fal_vision_integration(tmp_path):

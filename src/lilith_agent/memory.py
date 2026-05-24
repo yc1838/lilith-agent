@@ -1,5 +1,4 @@
 import os
-import json
 import sqlite3
 import logging
 import uuid
@@ -7,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
-from langchain_core.messages import BaseMessage, AIMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 
 log = logging.getLogger(__name__)
 

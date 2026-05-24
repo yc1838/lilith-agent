@@ -12,7 +12,7 @@ DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from lilith_agent.gaia_dataset import GaiaDatasetClient
+    pass
 
 
 class ScoringApiClient:
