@@ -34,7 +34,7 @@
    - 总正确率、各 level 正确率
    - 每题的 tool call 数、耗时、是否触发 fail_safe
    - 与上次 run 的 diff（新增正确 / 新增错误的题目列表）
-4. **回归检测**：维护一个 `golden_set`（约 20 题，覆盖各 level 和各工具组合），Phase 1/2/3 的每次 PR 都必须在 golden_set 上 pass 才能合并。
+4. **回归检测**：维护一个 `golden_set`（约 20 题，覆盖各 level 和各工具组合），Phase 1/2/3 的每次 PR 都必须在 golden_set 上 pass 才能合并。题目应按难度分层抽取，例如 L1×6、L2×8、L3×6，确保各难度均有覆盖，避免 golden_set 偏向简单题而漏测 Level 3 回归。
 
 ### 涉及文件
 
@@ -70,6 +70,8 @@
        "Answer JSON: {\"is_milestone\": true/false, \"summary\": \"one-line summary if true\"}"
    )
    ```
+
+   > **⚠️ 延迟预算**：cheap model 响应超过 2 秒时，跳过分类，降级为关键词匹配（检测"找到"/"发现"/"完成"/"The result is"等模式）。里程碑检测本身不应成为每步推理的瓶颈，超时降级确保 compaction 逻辑对主流程延迟影响可控。
 
 2. **里程碑摘要生成**：当 cheap model 判断 `is_milestone=true` 时，将其 summary 包装为结构化标记注入消息流：
    ```
