@@ -62,7 +62,7 @@ def test_jsonl_callback_captures_chat_model_payload(tmp_path):
     messages = [[SystemMessage(content="sys"), HumanMessage(content="hi")]]
     cb.on_chat_model_start({"name": "ChatAnthropic"}, messages, run_id="r0")
 
-    events = [json.loads(l) for l in (tmp_path / "trace.jsonl").read_text().splitlines()]
+    events = [json.loads(line) for line in (tmp_path / "trace.jsonl").read_text().splitlines()]
     assert events[0]["event"] == "chat_model_start"
     assert events[0]["model"] == "ChatAnthropic"
     assert any(m["type"] == "system" and m["content"] == "sys" for m in events[0]["messages"][0])
@@ -76,7 +76,7 @@ def test_jsonl_callback_captures_chain_boundaries(tmp_path):
     cb.on_chain_start({"name": "agent"}, {"messages": []}, run_id="c1")
     cb.on_chain_end({"messages": ["ok"]}, run_id="c1")
 
-    events = [json.loads(l) for l in (tmp_path / "trace.jsonl").read_text().splitlines()]
+    events = [json.loads(line) for line in (tmp_path / "trace.jsonl").read_text().splitlines()]
     assert events[0]["event"] == "chain_start"
     assert events[0]["name"] == "agent"
     assert events[1]["event"] == "chain_end"
@@ -130,7 +130,7 @@ def test_jsonl_callback_writes_tool_and_llm_events(tmp_path):
 
     lines = path.read_text().strip().splitlines()
     assert len(lines) == 3
-    events = [json.loads(l) for l in lines]
+    events = [json.loads(line) for line in lines]
     assert events[0]["event"] == "tool_start"
     assert events[0]["name"] == "web_search"
     assert events[0]["input"] == "moon perigee"

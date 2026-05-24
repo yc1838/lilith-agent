@@ -15,6 +15,11 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from typing import Annotated, TypedDict
 
+from lilith_agent.config import Config
+from lilith_agent.checkpointing import build_checkpointer
+from lilith_agent.models import get_cheap_model, get_extra_strong_model
+
+
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     iterations: int
@@ -25,10 +30,6 @@ class AgentState(TypedDict):
     supervisor_guidance: str
     supervisor_review_count: int
 
-
-from lilith_agent.config import Config
-from lilith_agent.checkpointing import build_checkpointer
-from lilith_agent.models import get_cheap_model, get_extra_strong_model
 
 log = logging.getLogger(__name__)
 # Per-node child loggers so the logger-name column reads `lilith_agent.nodes.X`

@@ -305,13 +305,6 @@ def summarize_episode(messages: List[BaseMessage], model) -> None:
             if "ERROR" in content.upper():
                 outcome = "failed/struggled"
                 
-        conv_parts = []
-        for m in messages:
-            content = _content_to_text(m.content)
-            if content:
-                conv_parts.append(f"{m.type}: {content[:200]}...")
-        conv_str = "\n".join(conv_parts)
-
         prompt = f"""
 Summarize this task trajectory for Lilith's 'Episodic Memory'.
 Initial Question: {initial_question}

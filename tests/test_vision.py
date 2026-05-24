@@ -1,11 +1,12 @@
 import os
-from dotenv import load_dotenv
 
-# Load .env before evaluating anything
-load_dotenv(override=True)
+from dotenv import load_dotenv
 
 from lilith_agent.config import Config
 from lilith_agent.tools.vision import inspect_visual_content
+
+# Load .env before evaluating test configuration.
+load_dotenv(override=True)
 
 def test_fal_vision_integration(tmp_path):
     """
