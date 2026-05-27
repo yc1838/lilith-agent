@@ -14,8 +14,8 @@ hf_oauth_expiration_minutes: 480
 # Lilith Agent
 
 🦋 A ReAct research assistant built on LangGraph. Lilith plans, calls tools, and answers open-ended research questions from a TUI or a batch runner over the GAIA benchmark.
-
-Currently 85% on gaig level 1 benchmark: https://huggingface.co/spaces/agents-course/Students_leaderboard
+[Leaderboard](https://huggingface.co/spaces/agents-course/Students_leaderboard) shows Currently 95% on GAIA level 1 benchmark under the Username: yc1838
+![GAIA Showoff](assets/GAIA_Showoff.png)
 
 
 ## Features
