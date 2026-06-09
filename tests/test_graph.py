@@ -256,7 +256,7 @@ def test_supervisor_nudges_agent_to_answer_when_evidence_is_enough(monkeypatch, 
     cfg.compact_summarize = False
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
@@ -313,7 +313,7 @@ def test_supervisor_uses_extra_strong_model_not_cheap_model(monkeypatch, tmp_pat
     cfg.compact_summarize = False
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", cheap_should_not_be_used)
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
@@ -362,7 +362,7 @@ def test_supervisor_finalizer_prompt_reinforces_original_question_contract(monke
     cfg.compact_summarize = False
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
@@ -413,7 +413,7 @@ def test_supervisor_finalizer_rejects_unknown_best_answer_and_forces_best_guess(
     cfg.compact_summarize = False
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
@@ -471,7 +471,7 @@ def test_supervisor_finalizes_even_with_placeholder_if_requested(monkeypatch, tm
     cfg.compact_summarize = False
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
@@ -528,7 +528,7 @@ def test_supervisor_forces_finalize_after_max_nudges(monkeypatch, tmp_path):
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MAX_NUDGES", 5, raising=False)
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
@@ -580,7 +580,7 @@ def test_final_answer_gets_supervisor_review_and_can_be_returned_for_revision(mo
     cfg.budget_warn_at = 99
     cfg.compact_summarize = False
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
@@ -638,7 +638,7 @@ def test_fail_safe_falls_back_to_supervisor_best_answer_when_empty(monkeypatch, 
     cfg.compact_summarize = False
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
@@ -690,7 +690,7 @@ def test_fail_safe_never_returns_empty_answer_without_best_answer(monkeypatch, t
     cfg.compact_summarize = False
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 99, raising=False)
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
@@ -749,7 +749,7 @@ def test_supervisor_review_auto_approves_after_fail_safe(monkeypatch, tmp_path):
     cfg.compact_summarize = False
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 99, raising=False)
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
@@ -821,7 +821,7 @@ def test_supervisor_finalizes_when_agent_ignores_prior_nudge(monkeypatch, tmp_pa
     cfg.compact_summarize = False
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
@@ -874,7 +874,7 @@ def test_supervisor_overhead_leaves_room_for_hard_cap_fail_safe(monkeypatch, tmp
     cfg.compact_summarize = False
     monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
     monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
-    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg: strong)
+    monkeypatch.setattr("lilith_agent.app.get_extra_strong_model", lambda cfg, thinking=True: strong)
     monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: FakeSupervisorModel())
     monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
     monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)

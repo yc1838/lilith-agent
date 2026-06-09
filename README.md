@@ -65,6 +65,19 @@ GAIA_STRONG_PROVIDER=anthropic
 GAIA_STRONG_MODEL=claude-sonnet-4-6
 GAIA_EXTRA_STRONG_PROVIDER=anthropic
 GAIA_EXTRA_STRONG_MODEL=claude-sonnet-4-6
+GAIA_AGENT_MODEL_TIER=extra_strong  # cheap | strong | extra_strong
+# Optional one-off override for the main agent model.
+# GAIA_AGENT_PROVIDER=deepseek
+# GAIA_AGENT_MODEL=deepseek-v4-pro
+
+# DeepSeek uses an OpenAI-compatible API.
+# DEEPSEEK_API_KEY=...
+# GAIA_DEEPSEEK_BASE_URL=https://api.deepseek.com
+# GAIA_CHEAP_PROVIDER=deepseek
+# GAIA_CHEAP_MODEL=deepseek-v4-flash
+# GAIA_STRONG_PROVIDER=deepseek
+# GAIA_STRONG_MODEL=deepseek-v4-pro
+
 GAIA_VISION_PROVIDER=fal
 GAIA_VISION_MODEL=gemini-3-flash-preview
 GAIA_CAVEMAN=true

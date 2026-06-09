@@ -41,6 +41,11 @@ class Config:
     tavily_api_key: str
     lmstudio_base_url: str
     max_tokens: int
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    agent_model_tier: str = "extra_strong"
+    agent_provider: str = ""
+    agent_model: str = ""
     caveman: bool = False
     caveman_mode: str = "full"
     recursion_limit: int = 100
@@ -54,6 +59,12 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
+        agent_model_tier = os.getenv("GAIA_AGENT_MODEL_TIER", "extra_strong").strip().lower()
+        if agent_model_tier not in {"cheap", "strong", "extra_strong"}:
+            raise ValueError(
+                "GAIA_AGENT_MODEL_TIER must be one of: cheap, strong, extra_strong"
+            )
+
         return cls(
             cheap_provider=os.getenv("GAIA_CHEAP_PROVIDER", "google"),
             cheap_model=os.getenv("GAIA_CHEAP_MODEL", "gemini-3-flash-preview"),
@@ -72,6 +83,11 @@ class Config:
             huggingface_api_key=os.getenv("GAIA_HUGGINGFACE_API_KEY", ""),
             tavily_api_key=os.getenv("GAIA_TAVILY_API_KEY", ""),
             lmstudio_base_url=os.getenv("GAIA_LMSTUDIO_BASE_URL", ""),
+            deepseek_api_key=os.getenv("GAIA_DEEPSEEK_API_KEY", os.getenv("DEEPSEEK_API_KEY", "")),
+            deepseek_base_url=os.getenv("GAIA_DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            agent_model_tier=agent_model_tier,
+            agent_provider=os.getenv("GAIA_AGENT_PROVIDER", "").strip(),
+            agent_model=os.getenv("GAIA_AGENT_MODEL", "").strip(),
             max_tokens=_get_int_env("GAIA_MAX_TOKENS", "65536"),
             caveman=os.getenv("GAIA_CAVEMAN", "true").lower() == "true",
             caveman_mode=os.getenv("GAIA_CAVEMAN_MODE", "full"),
