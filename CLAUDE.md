@@ -49,7 +49,7 @@ Untrusted-input boundary: the user's first `HumanMessage` is wrapped in `<gaia_q
 
 ### Config (`src/lilith_agent/config.py`)
 
-`Config.from_env()` reads `GAIA_*` env vars (note: `GAIA_` prefix, not `LILITH_`). Three model tiers: `cheap` / `strong` / `extra_strong`, each with independent provider+model. The agent's main model is **`extra_strong`**; `cheap` powers the tool-result summarizer. `extra_strong_*` defaults to `strong_*` if unset. The `vision_*` pair is separate, used by `inspect_visual_content`. Behavior flags: `caveman`, `caveman_mode`, `recursion_limit` (50), `budget_hard_cap` (25), `budget_warn_at` (15), `semantic_dedup_threshold` (0.5), `compact_summarize`, `llm_formatter_enabled`.
+`Config.from_env()` reads `GAIA_*` env vars (note: `GAIA_` prefix, not `LILITH_`). Three model tiers: `cheap` / `strong` / `extra_strong`, each with independent provider+model. The agent's main model defaults to **`extra_strong`**, can select `cheap` or `strong` via `GAIA_AGENT_MODEL_TIER`, and can be directly overridden with `GAIA_AGENT_PROVIDER` / `GAIA_AGENT_MODEL`; `cheap` powers the tool-result summarizer. `extra_strong_*` defaults to `strong_*` if unset. DeepSeek is available as provider `deepseek` using `DEEPSEEK_API_KEY` or `GAIA_DEEPSEEK_API_KEY`. The `vision_*` pair is separate, used by `inspect_visual_content`. Behavior flags: `caveman`, `caveman_mode`, `recursion_limit` (50), `budget_hard_cap` (25), `budget_warn_at` (15), `semantic_dedup_threshold` (0.5), `compact_summarize`, `llm_formatter_enabled`.
 
 ### Tools (`src/lilith_agent/tools/`)
 

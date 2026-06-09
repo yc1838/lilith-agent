@@ -423,3 +423,132 @@ async def test_async_bound_retry_wrapper_raises_cooldown_for_gemini_lane(monkeyp
         await bound.ainvoke([("user", "hi")])
 
     assert raised.value.model == "gemini-3.1-pro"
+
+
+def test_deepseek_config_defaults_and_env(monkeypatch):
+    from lilith_agent.config import Config
+
+    monkeypatch.delenv("GAIA_DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("GAIA_DEEPSEEK_BASE_URL", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-env-key")
+
+    cfg = Config.from_env()
+
+    assert cfg.deepseek_api_key == "ds-env-key"
+    assert cfg.deepseek_base_url == "https://api.deepseek.com"
+
+    monkeypatch.setenv("GAIA_DEEPSEEK_API_KEY", "gaia-ds-key")
+    monkeypatch.setenv("GAIA_DEEPSEEK_BASE_URL", "https://deepseek.internal")
+
+    cfg = Config.from_env()
+
+    assert cfg.deepseek_api_key == "gaia-ds-key"
+    assert cfg.deepseek_base_url == "https://deepseek.internal"
+
+
+def test_agent_model_tier_selects_configured_tier(monkeypatch):
+    from lilith_agent.config import Config
+    from lilith_agent.models import _resolve_agent_model_choice
+
+    monkeypatch.setenv("GAIA_CHEAP_PROVIDER", "deepseek")
+    monkeypatch.setenv("GAIA_CHEAP_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("GAIA_STRONG_PROVIDER", "deepseek")
+    monkeypatch.setenv("GAIA_STRONG_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("GAIA_AGENT_MODEL_TIER", "strong")
+
+    assert _resolve_agent_model_choice(Config.from_env()) == ("deepseek", "deepseek-v4-pro")
+
+
+def test_agent_model_direct_override_wins_over_tier(monkeypatch):
+    from lilith_agent.config import Config
+    from lilith_agent.models import _resolve_agent_model_choice
+
+    monkeypatch.setenv("GAIA_AGENT_MODEL_TIER", "cheap")
+    monkeypatch.setenv("GAIA_AGENT_PROVIDER", "deepseek")
+    monkeypatch.setenv("GAIA_AGENT_MODEL", "deepseek-v4-pro")
+
+    assert _resolve_agent_model_choice(Config.from_env()) == ("deepseek", "deepseek-v4-pro")
+
+
+def test_invalid_agent_model_tier_is_rejected(monkeypatch):
+    from lilith_agent.config import Config
+
+    monkeypatch.setenv("GAIA_AGENT_MODEL_TIER", "medium")
+
+    with pytest.raises(ValueError, match="GAIA_AGENT_MODEL_TIER"):
+        Config.from_env()
+
+
+def test_build_deepseek_uses_openai_compatible_endpoint(monkeypatch):
+    from dataclasses import replace
+
+    from lilith_agent.config import Config
+    from lilith_agent.models import _build
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr("lilith_agent.models.ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setattr(
+        "lilith_agent.models._RetryWrapper",
+        lambda inner, provider, model_name: inner,
+    )
+
+    cfg = replace(
+        Config.from_env(),
+        deepseek_api_key="ds-key",
+        deepseek_base_url="https://deepseek.internal",
+        max_tokens=123,
+    )
+
+    model = _build("deepseek", "deepseek-v4-flash", cfg)
+
+    assert model.kwargs == {
+        "model": "deepseek-v4-flash",
+        "api_key": "ds-key",
+        "base_url": "https://deepseek.internal",
+        "max_tokens": 123,
+    }
+
+
+def _fake_deepseek_cfg(monkeypatch):
+    from dataclasses import replace
+
+    from lilith_agent.config import Config
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr("lilith_agent.models.ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setattr(
+        "lilith_agent.models._RetryWrapper",
+        lambda inner, provider, model_name: inner,
+    )
+    return replace(
+        Config.from_env(),
+        deepseek_api_key="ds-key",
+        deepseek_base_url="https://deepseek.internal",
+        max_tokens=123,
+    )
+
+
+def test_build_deepseek_thinking_disabled_sets_extra_body(monkeypatch):
+    from lilith_agent.models import _build
+
+    cfg = _fake_deepseek_cfg(monkeypatch)
+
+    model = _build("deepseek", "deepseek-v4-flash", cfg, thinking=False)
+
+    assert model.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_build_deepseek_thinking_enabled_omits_extra_body(monkeypatch):
+    from lilith_agent.models import _build
+
+    cfg = _fake_deepseek_cfg(monkeypatch)
+
+    model = _build("deepseek", "deepseek-v4-flash", cfg)
+
+    assert "extra_body" not in model.kwargs

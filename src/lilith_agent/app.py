@@ -922,7 +922,10 @@ def build_react_agent(cfg: Config):
         guidance = str(state.get("supervisor_guidance", "") or "").strip()
         original_question = _initial_question_from_state(state)
         compacted = _compact_old_tool_messages(state["messages"], summarize_fn=summarize_fn)
-        response = base_model.invoke([
+        # Thinking mode (DeepSeek v4) emits tool-call markup as raw text here, where no
+        # tools are bound to parse it; disable it so the finalizer returns plain prose.
+        finalizer_model = get_extra_strong_model(cfg, thinking=False)
+        response = finalizer_model.invoke([
             SystemMessage(content=(
                 "SUPERVISOR FINALIZER: Stop tool use. Answer the original question, not an intermediate hop. "
                 "Produce a bare final answer in 'Final Answer: ...' form using the existing evidence. "
@@ -1012,7 +1015,9 @@ def build_react_agent(cfg: Config):
             log.debug("[memory] skipping extraction: only %d messages", len(messages))
             return state
         try:
-            cheap_model = get_cheap_model(cfg)
+            # langmem/trustcall forces tool_choice for structured extraction, which
+            # DeepSeek thinking mode rejects with a 400 it then retries forever.
+            cheap_model = get_cheap_model(cfg, thinking=False)
             extract_and_compress_facts(messages, cheap_model)
         except Exception as e:
             log.warning("[memory] failed to run extraction: %s", e)

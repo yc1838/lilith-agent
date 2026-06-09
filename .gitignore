@@ -18,3 +18,7 @@ gaia_eval_dashboard.html
 .claude/
 .codegraph/
 .cursor/
+.pycache/
+.__pycache__/
+.ruff_cache/
+.venv/

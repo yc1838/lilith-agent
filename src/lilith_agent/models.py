@@ -109,6 +109,7 @@ if SQLiteCache:
 log = logging.getLogger(__name__)
 
 LMSTUDIO_DEFAULT_BASE_URL = "http://localhost:1234/v1"
+DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 _NO_THINK = "/no_think"
 _GEMINI_COOLDOWN_MODELS = {"gemini-3-flash-preview", "gemini-3.1-pro"}
 _COOLDOWN_LADDER_SECONDS = (60, 120, 300)
@@ -460,7 +461,27 @@ class _BoundRetryWrapper(Runnable):
         return getattr(self._bound, name)
 
 
-def _build(provider: str, model: str, cfg: Config) -> BaseChatModel:
+def _resolve_agent_model_choice(cfg: Config) -> tuple[str, str]:
+    tier = (cfg.agent_model_tier or "extra_strong").strip().lower()
+    tiers = {
+        "cheap": (cfg.cheap_provider, cfg.cheap_model),
+        "strong": (cfg.strong_provider, cfg.strong_model),
+        "extra_strong": (cfg.extra_strong_provider, cfg.extra_strong_model),
+    }
+    if tier not in tiers:
+        raise ValueError(
+            "GAIA_AGENT_MODEL_TIER must be one of: cheap, strong, extra_strong"
+        )
+
+    provider, model = tiers[tier]
+    return (
+        (cfg.agent_provider or provider).strip(),
+        (cfg.agent_model or model).strip(),
+    )
+
+
+def _build(provider: str, model: str, cfg: Config, thinking: bool = True) -> BaseChatModel:
+    provider = provider.strip().lower()
     log.info("Building model for provider=%r, model=%r", provider, model)
     max_tokens = cfg.max_tokens
     
@@ -493,6 +514,19 @@ def _build(provider: str, model: str, cfg: Config) -> BaseChatModel:
             repo_id=model, huggingfacehub_api_token=cfg.huggingface_api_key, max_new_tokens=max_tokens
         )
         return _wrap(ChatHuggingFace(llm=endpoint))
+    if provider == "deepseek":
+        ds_kwargs = dict(
+            model=model,
+            base_url=cfg.deepseek_base_url or DEEPSEEK_DEFAULT_BASE_URL,
+            api_key=cfg.deepseek_api_key,
+            max_tokens=max_tokens,
+        )
+        # DeepSeek v4 defaults to thinking mode, which rejects forced tool_choice
+        # (langmem extraction) and leaks raw tool-call markup in free-text calls
+        # (finalizer). Opt out explicitly when the caller needs a plain response.
+        if not thinking:
+            ds_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        return _wrap(ChatOpenAI(**ds_kwargs))
     if provider == "lmstudio":
         # LM Studio exposes an OpenAI-compatible API.
         inner = ChatOpenAI(
@@ -509,13 +543,14 @@ def _build(provider: str, model: str, cfg: Config) -> BaseChatModel:
     raise ValueError(f"Unknown provider: {provider}")
 
 
-def get_cheap_model(cfg: Config) -> BaseChatModel:
-    return _build(cfg.cheap_provider, cfg.cheap_model, cfg)
+def get_cheap_model(cfg: Config, thinking: bool = True) -> BaseChatModel:
+    return _build(cfg.cheap_provider, cfg.cheap_model, cfg, thinking=thinking)
 
 
 def get_strong_model(cfg: Config) -> BaseChatModel:
     return _build(cfg.strong_provider, cfg.strong_model, cfg)
 
 
-def get_extra_strong_model(cfg: Config) -> BaseChatModel:
-    return _build(cfg.extra_strong_provider, cfg.extra_strong_model, cfg)
+def get_extra_strong_model(cfg: Config, thinking: bool = True) -> BaseChatModel:
+    provider, model = _resolve_agent_model_choice(cfg)
+    return _build(provider, model, cfg, thinking=thinking)
