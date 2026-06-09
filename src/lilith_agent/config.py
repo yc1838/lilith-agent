@@ -43,7 +43,7 @@ class Config:
     max_tokens: int
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
-    agent_model_tier: str = "extra_strong"
+    agent_model_tier: str = "strong"
     agent_provider: str = ""
     agent_model: str = ""
     caveman: bool = False
@@ -59,10 +59,10 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
-        agent_model_tier = os.getenv("GAIA_AGENT_MODEL_TIER", "extra_strong").strip().lower()
-        if agent_model_tier not in {"cheap", "strong", "extra_strong"}:
+        agent_model_tier = os.getenv("GAIA_AGENT_MODEL_TIER", "strong").strip().lower()
+        if agent_model_tier not in {"cheap", "strong"}:
             raise ValueError(
-                "GAIA_AGENT_MODEL_TIER must be one of: cheap, strong, extra_strong"
+                "GAIA_AGENT_MODEL_TIER must be one of: cheap, strong"
             )
 
         return cls(

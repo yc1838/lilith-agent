@@ -462,15 +462,14 @@ class _BoundRetryWrapper(Runnable):
 
 
 def _resolve_agent_model_choice(cfg: Config) -> tuple[str, str]:
-    tier = (cfg.agent_model_tier or "extra_strong").strip().lower()
+    tier = (cfg.agent_model_tier or "strong").strip().lower()
     tiers = {
         "cheap": (cfg.cheap_provider, cfg.cheap_model),
         "strong": (cfg.strong_provider, cfg.strong_model),
-        "extra_strong": (cfg.extra_strong_provider, cfg.extra_strong_model),
     }
     if tier not in tiers:
         raise ValueError(
-            "GAIA_AGENT_MODEL_TIER must be one of: cheap, strong, extra_strong"
+            "GAIA_AGENT_MODEL_TIER must be one of: cheap, strong"
         )
 
     provider, model = tiers[tier]
@@ -547,8 +546,8 @@ def get_cheap_model(cfg: Config, thinking: bool = True) -> BaseChatModel:
     return _build(cfg.cheap_provider, cfg.cheap_model, cfg, thinking=thinking)
 
 
-def get_strong_model(cfg: Config) -> BaseChatModel:
-    return _build(cfg.strong_provider, cfg.strong_model, cfg)
+def get_strong_model(cfg: Config, thinking: bool = True) -> BaseChatModel:
+    return _build(cfg.strong_provider, cfg.strong_model, cfg, thinking=thinking)
 
 
 def get_extra_strong_model(cfg: Config, thinking: bool = True) -> BaseChatModel:

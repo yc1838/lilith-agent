@@ -17,7 +17,7 @@ from typing import Annotated, TypedDict
 
 from lilith_agent.config import Config
 from lilith_agent.checkpointing import build_checkpointer
-from lilith_agent.models import get_cheap_model, get_extra_strong_model
+from lilith_agent.models import get_cheap_model, get_strong_model
 
 
 class AgentState(TypedDict):
@@ -627,9 +627,13 @@ def build_react_agent(cfg: Config):
         log.warning("Tools not found; running with zero tools.")
         tools = []
 
-    base_model = get_extra_strong_model(cfg)
+    base_model = get_strong_model(cfg)
     model = base_model.bind_tools(tools)
-    supervisor_model = base_model
+    try:
+        no_think_model = get_strong_model(cfg, thinking=False)
+    except TypeError:
+        no_think_model = base_model
+    supervisor_model = no_think_model
     summarize_fn = _make_tool_result_summarizer(cfg) if cfg.compact_summarize else None
 
     def _initial_question_from_state(state) -> str:
@@ -802,7 +806,7 @@ def build_react_agent(cfg: Config):
             f"Original question: {original_question}"
         )
         compacted = _compact_old_tool_messages(state["messages"], summarize_fn=summarize_fn)
-        response = base_model.invoke([SystemMessage(sys_prompt)] + compacted)
+        response = no_think_model.invoke([SystemMessage(sys_prompt)] + compacted)
         content_text = _message_text(getattr(response, "content", "")).strip()
 
         if not content_text or "final answer" not in content_text.lower():
@@ -922,10 +926,7 @@ def build_react_agent(cfg: Config):
         guidance = str(state.get("supervisor_guidance", "") or "").strip()
         original_question = _initial_question_from_state(state)
         compacted = _compact_old_tool_messages(state["messages"], summarize_fn=summarize_fn)
-        # Thinking mode (DeepSeek v4) emits tool-call markup as raw text here, where no
-        # tools are bound to parse it; disable it so the finalizer returns plain prose.
-        finalizer_model = get_extra_strong_model(cfg, thinking=False)
-        response = finalizer_model.invoke([
+        response = no_think_model.invoke([
             SystemMessage(content=(
                 "SUPERVISOR FINALIZER: Stop tool use. Answer the original question, not an intermediate hop. "
                 "Produce a bare final answer in 'Final Answer: ...' form using the existing evidence. "

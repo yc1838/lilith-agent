@@ -3,13 +3,17 @@ from lilith_agent.config import Config
 from lilith_agent.app import build_react_agent
 from langchain_core.messages import HumanMessage
 
-def test_build_react_agent_uses_sqlite_saver(tmp_path):
+def test_build_react_agent_uses_sqlite_saver(tmp_path, monkeypatch):
+    class FakeModel:
+        def bind_tools(self, tools):
+            return self
+
     cfg = Config.from_env()
-    
-    # Temporarily override where the agent looks for the .lilith dir
-    import os
-    os.environ["LILITH_HOME"] = str(tmp_path / ".lilith")
-    
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app.get_strong_model", lambda cfg, **kw: FakeModel())
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: FakeModel())
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [])
+
     agent = build_react_agent(cfg)
     
     assert agent.checkpointer is not None

@@ -17,6 +17,8 @@ from lilith_agent.app import build_react_agent
 from lilith_agent.observability import setup_logging, setup_arize, JsonlTraceCallback
 
 env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+if not env_path.exists():
+    env_path = Path.cwd() / ".env"
 load_dotenv(dotenv_path=env_path, override=True)
 
 custom_theme = Theme({

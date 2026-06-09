@@ -30,3 +30,5 @@ fal-client
 tenacity
 rich>=13.0.0
 prompt-toolkit>=3.0.0
+arize-otel 
+openinference-instrumentation-langchain
