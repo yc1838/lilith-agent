@@ -298,45 +298,22 @@ def summarize_episode(messages: List[BaseMessage], model) -> None:
     try:
         initial_question = ""
         outcome = "success"
-        tool_names_used = set()
-        fetch_url_used = False
-        search_count = 0
         for m in messages:
             content = _content_to_text(m.content)
             if isinstance(m, HumanMessage) and not initial_question:
                 initial_question = content
             if "ERROR" in content.upper():
                 outcome = "failed/struggled"
-            if hasattr(m, "tool_calls"):
-                for tc in (m.tool_calls or []):
-                    name = tc.get("name", "") if isinstance(tc, dict) else ""
-                    tool_names_used.add(name)
-                    if name == "fetch_url":
-                        fetch_url_used = True
-                    if name == "web_search":
-                        search_count += 1
-
-        quality_notes = []
-        if search_count > 0 and not fetch_url_used:
-            quality_notes.append("Agent searched but never read any source pages (fetch_url unused)")
-        if search_count > 8:
-            quality_notes.append(f"High search volume ({search_count} searches) — possible over-searching")
-        quality_section = ""
-        if quality_notes:
-            quality_section = "\nQuality flags: " + "; ".join(quality_notes)
-
+                
         prompt = f"""
 Summarize this task trajectory for Lilith's 'Episodic Memory'.
 Initial Question: {initial_question}
 Outcome: {outcome}
-Tools used: {', '.join(sorted(tool_names_used)) if tool_names_used else 'none'}
-{quality_section}
 
 Briefly explain:
 1. What was the goal?
 2. What tools worked? What failed?
 3. What is the 'lesson learned' for next time?
-4. If quality flags are present, note them as areas for improvement.
 
 Keep it under 150 words.
 """

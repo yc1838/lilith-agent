@@ -629,11 +629,7 @@ def build_react_agent(cfg: Config):
 
     base_model = get_strong_model(cfg)
     model = base_model.bind_tools(tools)
-    try:
-        no_think_model = get_strong_model(cfg, thinking=False)
-    except TypeError:
-        no_think_model = base_model
-    supervisor_model = no_think_model
+    supervisor_model = base_model
     summarize_fn = _make_tool_result_summarizer(cfg) if cfg.compact_summarize else None
 
     def _initial_question_from_state(state) -> str:
@@ -709,25 +705,7 @@ def build_react_agent(cfg: Config):
             "(e.g. 'The answer is', 'He said', character names, quotation marks). Constraint compliance beats "
             "completeness: an over-long answer is wrong, not safer."
             "11. MATHEMATICAL PRECISION: If the question requires math, double-check your algebraic calculations carefully. If a specific decimal precision or rounding is asked for (e.g., 'to 2 decimal places', 'nearest tenth'), you MUST calculate precisely and round STRICTLY AT THE VERY END. Do NOT prematurely round intermediate numbers.\n"
-            "12. FINAL ANSWER FORMAT: When you have the final answer, output ONLY the value itself. Do not say 'The answer is...', do not provide explanations in your final output. Just output the bare minimum exact string, number, or list.\n"
-            "13. RESEARCH METHODOLOGY: When the task is open-ended research (competitive analysis, market research, "
-            "literature review, product comparison — anything where the answer is a synthesis rather than a single fact), "
-            "follow these additional rules:\n"
-            "  a) VERIFY BEFORE CLAIMING: After `web_search`, use `fetch_url` on the top 2-3 most relevant result URLs "
-            "to read full page content. Never build a synthesis from search snippets alone — snippets are for discovery, "
-            "fetched pages are for evidence.\n"
-            "  b) CITE INLINE: Every factual claim about a product, feature, or competitor MUST include an inline URL "
-            "citation in parentheses: 'Feature X exists (https://source.com/page)'. Claims you have NOT verified via "
-            "`fetch_url` must be explicitly labeled '[INFERRED — not verified]'.\n"
-            "  c) ENUMERATE FIRST: Before drilling into feature-by-feature comparisons, list 10-15 candidate entities "
-            "(competitors, products, tools) by name using broad searches. Then verify each with targeted searches and "
-            "page reads. This prevents coverage gaps from narrow initial queries.\n"
-            "  d) SCOPE ANCHOR: Re-read the original question before synthesizing. Your final answer must directly "
-            "address the original question as stated, not drift into an adjacent category. If the user asked about "
-            "'voice-controlled audiobook platforms', do not deliver an analysis of 'AI language learning apps'.\n"
-            "  e) EVIDENCE vs PRIOR: Distinguish between claims grounded in fetched sources and claims from your "
-            "training data. If you haven't verified something with a tool, do not present it with the same confidence "
-            "as evidenced claims."
+            "12. FINAL ANSWER FORMAT: When you have the final answer, output ONLY the value itself. Do not say 'The answer is...', do not provide explanations in your final output. Just output the bare minimum exact string, number, or list."
         )
         
         if memory_context:
@@ -824,7 +802,7 @@ def build_react_agent(cfg: Config):
             f"Original question: {original_question}"
         )
         compacted = _compact_old_tool_messages(state["messages"], summarize_fn=summarize_fn)
-        response = no_think_model.invoke([SystemMessage(sys_prompt)] + compacted)
+        response = base_model.invoke([SystemMessage(sys_prompt)] + compacted)
         content_text = _message_text(getattr(response, "content", "")).strip()
 
         if not content_text or "final answer" not in content_text.lower():
@@ -880,15 +858,7 @@ def build_react_agent(cfg: Config):
             "five times and the agent has not improved, use finalize to force termination — do not nudge "
             "repeatedly. Never put placeholder values like unknown, n/a, none, or not "
             "sure in best_answer. If no concrete submit-ready answer is available, set best_answer "
-            "to an empty string and use guidance to force the agent to make its best guess.\n\n"
-            "RESEARCH QUALITY CHECKS (apply when the task is open-ended research, not factoid QA):\n"
-            "- Has the agent used fetch_url to read source pages, or only relied on search snippets?\n"
-            "- Does the synthesis stay anchored to the original question scope?\n"
-            "- Are factual claims grounded in fetched sources with URLs, or are they unsupported assertions?\n"
-            "- Has the agent enumerated candidate entities broadly before drilling into details?\n"
-            "If the agent is synthesizing from snippets alone without reading any source pages, "
-            "nudge it to use fetch_url on key URLs before finalizing. Include the original question "
-            "in your guidance to prevent scope drift."
+            "to an empty string and use guidance to force the agent to make its best guess."
         )
         response = supervisor_model.invoke([
             SystemMessage(content=prompt),
@@ -952,19 +922,15 @@ def build_react_agent(cfg: Config):
         guidance = str(state.get("supervisor_guidance", "") or "").strip()
         original_question = _initial_question_from_state(state)
         compacted = _compact_old_tool_messages(state["messages"], summarize_fn=summarize_fn)
-        # Bind tools with tool_choice="none" so the model is forced to emit text. Invoked
-        # unbound against a tool-laden history, DeepSeek emits raw tool-call markup that
-        # no schema parses, leaking into content. Requires thinking-off (no_think_model).
-        finalizer_caller = no_think_model.bind_tools(tools, tool_choice="none") if tools else no_think_model
-        response = finalizer_caller.invoke([
+        # Thinking mode (DeepSeek v4) emits tool-call markup as raw text here, where no
+        # tools are bound to parse it; disable it so the finalizer returns plain prose.
+        finalizer_model = get_strong_model(cfg, thinking=False)
+        response = finalizer_model.invoke([
             SystemMessage(content=(
                 "SUPERVISOR FINALIZER: Stop tool use. Answer the original question, not an intermediate hop. "
                 "Produce a bare final answer in 'Final Answer: ...' form using the existing evidence. "
                 "Do not answer unknown, n/a, none, or not sure. If evidence is imperfect, make the strongest "
                 "best guess supported by the transcript, search snippets, tool outputs, and prior reasoning. "
-                "For open-ended research tasks: include inline URL citations for every factual claim; "
-                "label any claim not backed by a fetched source as '[INFERRED]'; ensure the answer directly "
-                "addresses the original question scope without drifting into adjacent categories.\n"
                 f"Original question: {original_question}\n"
                 f"Supervisor guidance: {guidance}"
             )),

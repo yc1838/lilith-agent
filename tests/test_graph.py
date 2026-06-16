@@ -31,7 +31,7 @@ def test_graph_returns_fail_safe_answer_when_hard_cap_hits_near_recursion_limit(
         def __init__(self):
             self.calls = 0
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
             return self
 
         def invoke(self, messages):
@@ -72,7 +72,7 @@ def test_graph_returns_fail_safe_answer_when_hard_cap_hits_near_recursion_limit(
 
 def test_build_react_agent_prints_effective_recursion_limit(monkeypatch, tmp_path, capsys):
     class FakeModel:
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
             return self
 
     cfg = Config.from_env()
@@ -95,7 +95,7 @@ def test_model_prompt_includes_youtube_fallback_strategy(monkeypatch, tmp_path):
         def __init__(self):
             self.system_prompt = ""
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
             return self
 
         def invoke(self, messages):
@@ -144,7 +144,9 @@ def test_fail_safe_uses_unbound_model_to_prevent_more_tool_calls(monkeypatch, tm
         def __init__(self):
             self.bound = FakeBoundModel()
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -188,7 +190,9 @@ def test_fail_safe_prompt_reinforces_original_question_contract(monkeypatch, tmp
             self.bound = FakeBoundModel()
             self.fail_safe_prompt = ""
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -241,7 +245,9 @@ def test_supervisor_nudges_agent_to_answer_when_evidence_is_enough(monkeypatch, 
             self.bound = FakeBoundModel()
             self.supervisor_calls = 0
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -294,7 +300,9 @@ def test_supervisor_uses_extra_strong_model_not_cheap_model(monkeypatch, tmp_pat
             self.bound = FakeBoundModel()
             self.supervisor_calls = 0
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -344,7 +352,9 @@ def test_supervisor_finalizer_prompt_reinforces_original_question_contract(monke
             self.bound = FakeBoundModel()
             self.finalizer_prompt = ""
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -395,7 +405,9 @@ def test_supervisor_finalizer_rejects_unknown_best_answer_and_forces_best_guess(
             self.bound = FakeBoundModel()
             self.finalizer_calls = 0
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -449,7 +461,9 @@ def test_supervisor_finalizes_even_with_placeholder_if_requested(monkeypatch, tm
             self.supervisor_calls = 0
             self.finalizer_calls = 0
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -487,6 +501,65 @@ def test_supervisor_finalizes_even_with_placeholder_if_requested(monkeypatch, tm
     assert strong.supervisor_calls == 2
 
 
+def test_supervisor_finalizer_forbids_tool_calls_to_prevent_markup_leak(monkeypatch, tmp_path):
+    # DeepSeek thinking-off still emits raw tool-call markup when invoked unbound
+    # against a tool-laden history. The finalizer must bind tools with
+    # tool_choice="none" so the model is forced to answer in plain text.
+    dsml_leak = '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="web_search"></｜｜DSML｜｜invoke>'
+
+    class FakeBoundModel:
+        def invoke(self, messages):
+            return _ai_with_calls([
+                {"id": "call", "name": "echo_tool", "args": {"text": "evidence"}}
+            ])
+
+    class FakeFinalizerBound:
+        def invoke(self, messages):
+            return AIMessage(content="Final Answer: synthesized report")
+
+    class FakeStrongModel:
+        def __init__(self):
+            self.bound = FakeBoundModel()
+            self.finalizer_tool_choice = None
+
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                self.finalizer_tool_choice = "none"
+                return FakeFinalizerBound()
+            return self.bound
+
+        def invoke(self, messages):
+            prompt = str(messages[0].content)
+            if "SUPERVISOR FINALIZER" in prompt:
+                # Reached only if the finalizer wrongly invokes the unbound model.
+                return AIMessage(content=dsml_leak)
+            return AIMessage(content='{"status":"finalize","best_answer":"","guidance":"Evidence is enough."}')
+
+    strong = FakeStrongModel()
+    cfg = Config.from_env()
+    cfg.recursion_limit = 10
+    cfg.budget_hard_cap = 99
+    cfg.budget_warn_at = 99
+    cfg.compact_summarize = False
+    monkeypatch.setenv("LILITH_HOME", str(tmp_path / ".lilith"))
+    monkeypatch.setattr("lilith_agent.app._SUPERVISOR_MIN_TOOL_CALLS", 1, raising=False)
+    monkeypatch.setattr("lilith_agent.app.get_strong_model", lambda cfg, thinking=True: strong)
+    monkeypatch.setattr("lilith_agent.app.get_cheap_model", lambda cfg: object())
+    monkeypatch.setattr("lilith_agent.tools.build_tools", lambda cfg: [echo_tool])
+    monkeypatch.setattr("lilith_agent.memory.extract_and_compress_facts", lambda messages, model: None)
+
+    graph = build_react_agent(cfg)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="Research the competitor landscape.")], "iterations": 0, "todos": []},
+        {"configurable": {"thread_id": "supervisor-finalizer-markup-leak-test"}},
+    )
+
+    final = result["messages"][-1].content
+    assert "DSML" not in final
+    assert final == "Final Answer: synthesized report"
+    assert strong.finalizer_tool_choice == "none"
+
+
 def test_supervisor_forces_finalize_after_max_nudges(monkeypatch, tmp_path):
     class FakeBoundModel:
         def __init__(self):
@@ -508,7 +581,9 @@ def test_supervisor_forces_finalize_after_max_nudges(monkeypatch, tmp_path):
             self.supervisor_calls = 0
             self.finalizer_calls = 0
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -561,7 +636,9 @@ def test_final_answer_gets_supervisor_review_and_can_be_returned_for_revision(mo
             self.bound = FakeBoundModel()
             self.review_calls = 0
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -619,7 +696,9 @@ def test_fail_safe_falls_back_to_supervisor_best_answer_when_empty(monkeypatch, 
             self.fail_safe_calls = 0
             self.supervisor_calls = 0
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -676,7 +755,9 @@ def test_fail_safe_never_returns_empty_answer_without_best_answer(monkeypatch, t
         def __init__(self):
             self.bound = FakeBoundModel()
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -729,7 +810,9 @@ def test_supervisor_review_auto_approves_after_fail_safe(monkeypatch, tmp_path):
             self.bound = FakeBoundModel()
             self.review_calls = 0
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -806,7 +889,9 @@ def test_supervisor_finalizes_when_agent_ignores_prior_nudge(monkeypatch, tmp_pa
             self.bound = FakeBoundModel()
             self.supervisor_calls = 0
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
@@ -856,7 +941,9 @@ def test_supervisor_overhead_leaves_room_for_hard_cap_fail_safe(monkeypatch, tmp
         def __init__(self):
             self.bound = FakeBoundModel()
 
-        def bind_tools(self, tools):
+        def bind_tools(self, tools, **kwargs):
+            if kwargs.get("tool_choice") == "none":
+                return self
             return self.bound
 
         def invoke(self, messages):
